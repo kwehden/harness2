@@ -28,6 +28,47 @@ from harness2.core.spec import resolve_channel_model
 from harness2.demo import BASE_SCRIPT, DemoAdapter, DemoProposer
 
 
+class HaikuImproverTests(unittest.TestCase):
+    def test_haiku_55_uses_adaptive_effort_without_legacy_variant(self):
+        for model_id in ("us.anthropic.claude-haiku-5-5", "global.anthropic.claude-haiku-5-5"):
+            with self.subTest(model_id=model_id):
+                self._check_options(
+                    f"amazon-bedrock/{model_id}",
+                    {"type": "adaptive", "maxReasoningEffort": "high"},
+                    variant=False,
+                )
+
+    def test_older_bedrock_claude_keeps_legacy_variant(self):
+        self._check_options(
+            "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            None,
+            variant=True,
+        )
+
+    def _check_options(self, model: str, expected: dict | None, *, variant: bool):
+        proposer = Proposer(resolve_channel_model("opencode", model, effort="high"))
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "harness2.core.proposer.subprocess.run"
+        ) as run:
+            run.return_value = Mock(
+                stdout='{"type":"text","part":{"text":"done"}}', stderr="", returncode=0
+            )
+            proposer._opencode(Path(tmp), "mission", "system", 5)
+            oc_config = json.loads((Path(tmp) / "opencode.json").read_text())
+            cmd = run.call_args.args[0]
+        self.assertEqual("--variant" in cmd, variant)
+        if variant:
+            self.assertEqual(cmd[-2:], ["--variant", "high"])
+            self.assertNotIn("provider", oc_config)
+        else:
+            self.assertEqual(
+                oc_config["provider"]["amazon-bedrock"]["models"][model.split("/", 1)[1]][
+                    "options"
+                ]["reasoningConfig"],
+                expected,
+            )
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

@@ -261,9 +261,29 @@ class Proposer:
         out = cwd / "output"
         out.mkdir(exist_ok=True)
 
-        (cwd / "opencode.json").write_text(
-            json.dumps({"agent": {"build": {"steps": self.spec.steps}}}), encoding="utf-8"
+        # Haiku 5.5 rejects the fixed-budget "high" variant OpenCode assigns to older
+        # Bedrock Claude models. Use adaptive thinking with the requested effort instead.
+        model_id = self.spec.model.removeprefix("amazon-bedrock/")
+        adaptive_haiku = self.spec.model.startswith("amazon-bedrock/") and bool(
+            re.fullmatch(r"(?:(?:us|eu|au|jp|global)\.)?anthropic\.claude-haiku-5-5", model_id)
         )
+        oc_config = {"agent": {"build": {"steps": self.spec.steps}}}
+        if adaptive_haiku and self.spec.effort:
+            oc_config["provider"] = {
+                "amazon-bedrock": {
+                    "models": {
+                        model_id: {
+                            "options": {
+                                "reasoningConfig": {
+                                    "type": "adaptive",
+                                    "maxReasoningEffort": self.spec.effort,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        (cwd / "opencode.json").write_text(json.dumps(oc_config), encoding="utf-8")
         prompt = (
             "Read MISSION.md first. Do what it asks. Reply with the requested output as "
             "your final message AND save it verbatim to output/answer.md."
@@ -293,7 +313,7 @@ class Proposer:
             "--format",
             "json",
         ]
-        if self.spec.effort:
+        if self.spec.effort and not adaptive_haiku:
             cmd += ["--variant", self.spec.effort]
         p = subprocess.run(
             cmd,
