@@ -620,7 +620,14 @@ def run_batch(
         env = {
             **os.environ,
             "NO_FORCE_BUILD": "1",
-            "HARNESS2_WB_VERTEX_URL": config.VERTEX_OPENAI_URL + "/chat/completions",
+            **(
+                {
+                    "HARNESS2_WB_BRIDGE_URL": config.BRIDGE_URL,
+                    "HARNESS2_BRIDGE_KEY": config.BRIDGE_KEY,
+                }
+                if config.ON_AWS
+                else {"HARNESS2_WB_VERTEX_URL": config.VERTEX_OPENAI_URL + "/chat/completions"}
+            ),
         }
         try:
             with _slots[substrate]:

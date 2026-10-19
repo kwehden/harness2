@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Serve a Responses-API endpoint on Vertex AI for the Codex executor."""
+"""Serve an OpenAI-compatible endpoint on Vertex AI or Amazon Bedrock.
+
+On Vertex it backs the Codex executor. On AWS it also serves the JobBench judge and
+WorkBuddy's model routes, which speak the OpenAI protocol that Bedrock does not.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +41,35 @@ litellm_settings:
 general_settings:
   master_key: os.environ/HARNESS2_BRIDGE_KEY
 """
+
+BEDROCK_MODEL = """  - model_name: {model}
+    litellm_params:
+      model: bedrock/{route}{model}
+      aws_region_name: os.environ/AWS_REGION
+{profile}"""
+
+
+def bedrock_models() -> list[str]:
+    """The bare Bedrock IDs a run asks the bridge for: Codex, judge, and WorkBuddy solver."""
+    wanted = [config.SOLVER_MODEL_CX, config.JUDGE_MODEL]
+    if config.SOLVER_MODEL_OC.startswith(config.BEDROCK_PREFIX):
+        wanted.append(config.SOLVER_MODEL_OC.removeprefix(config.BEDROCK_PREFIX))
+    return list(dict.fromkeys(m for m in wanted if m))
+
+
+def litellm_config(models: list[str]) -> str:
+    if not config.ON_AWS:
+        return LITELLM_CONFIG.format(model=models[0])
+    profile = "      aws_profile_name: os.environ/AWS_PROFILE\n" if config.AWS_PROFILE else ""
+    # Claude goes through Bedrock's native Anthropic invoke API: LiteLLM's Converse
+    # translation of Codex's Responses requests sends tool_choice twice, which Bedrock
+    # rejects. Other models keep the default Converse route.
+    entries = "".join(
+        BEDROCK_MODEL.format(model=m, route="invoke/" if "anthropic." in m else "", profile=profile)
+        for m in models
+    )
+    tail = LITELLM_CONFIG.partition("litellm_settings:")[2]
+    return "model_list:\n" + entries + "litellm_settings:" + tail
 
 
 def _free_port(host: str) -> int:
@@ -63,7 +96,12 @@ def _endpoint(path: Path, host: str, port: int) -> dict:
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--model", default=config.SOLVER_MODEL_CX, help="Vertex model ID to serve")
+    p.add_argument(
+        "--model",
+        action="append",
+        help="model ID to serve; repeatable. Default: the Codex model, plus on AWS the "
+        "judge and WorkBuddy solver",
+    )
     p.add_argument(
         "--host",
         default="127.0.0.1",
@@ -75,32 +113,51 @@ def main(argv=None):
     litellm = Path(sys.executable).with_name("litellm")
     if not litellm.is_file():
         p.exit(1, "LiteLLM is not installed; run: uv pip install -e '.[render,bridge]'\n")
-    if not config.VERTEX_PROJECT:
-        p.exit(1, "Set GOOGLE_CLOUD_PROJECT in .env\n")
+    if config.ON_AWS:
+        models = args.model or bedrock_models()
+        if not config.aws_credentials_configured():
+            p.exit(1, "Set AWS_PROFILE in .env\n")
+    else:
+        models = args.model or [config.SOLVER_MODEL_CX]
+        if len(models) > 1:
+            p.exit(1, "The Vertex bridge serves one model; pass --model once\n")
+        if not config.VERTEX_PROJECT:
+            p.exit(1, "Set GOOGLE_CLOUD_PROJECT in .env\n")
+    if not any(models):
+        p.exit(1, "No model to serve; set HARNESS2_SOLVER_MODEL or pass --model\n")
 
-    root = config.DEPENDENCIES / "codex"
-    endpoint = _endpoint(root / "bridge.json", args.host, args.port)
+    root = config.BRIDGE_FILE.parent
+    endpoint = _endpoint(config.BRIDGE_FILE, args.host, args.port)
     port = endpoint["port"]
-    litellm_config = root / "bridge.yaml"
-    litellm_config.write_text(LITELLM_CONFIG.format(model=args.model), encoding="utf-8")
+    bridge_yaml = root / "bridge.yaml"
+    bridge_yaml.write_text(litellm_config(models), encoding="utf-8")
 
     settings = {
         "HARNESS2_CODEX_BASE_URL": f"http://127.0.0.1:{port}/v1",
         "HARNESS2_CODEX_API_KEY": endpoint["key"],
-        "HARNESS2_CODEX_MODEL": args.model,
+        "HARNESS2_CODEX_MODEL": models[0],
     }
     if args.host != "127.0.0.1":
         settings["HARNESS2_CODEX_CONTAINER_URL"] = f"http://host.docker.internal:{port}/v1"
-    print("Add these to .env, then run harness2-setup <bench> --substrate cx:")
+    if config.ON_AWS:
+        print(f"Serving Bedrock models: {', '.join(models)}")
+        print("The JobBench judge and WorkBuddy routes find this bridge automatically.")
+    print("For Codex, add these to .env, then run harness2-setup <bench> --substrate cx:")
     print("\n".join(f"{name}={value}" for name, value in settings.items()), flush=True)
 
     env = {
         **os.environ,
         "HARNESS2_BRIDGE_KEY": endpoint["key"],
-        "GOOGLE_CLOUD_PROJECT": config.VERTEX_PROJECT,
-        "GOOGLE_CLOUD_LOCATION": config.VERTEX_REGION,
+        **(
+            {"AWS_REGION": config.AWS_REGION}
+            if config.ON_AWS
+            else {
+                "GOOGLE_CLOUD_PROJECT": config.VERTEX_PROJECT,
+                "GOOGLE_CLOUD_LOCATION": config.VERTEX_REGION,
+            }
+        ),
     }
-    command = [str(litellm), "--config", str(litellm_config), "--host", args.host]
+    command = [str(litellm), "--config", str(bridge_yaml), "--host", args.host]
     os.execve(str(litellm), [*command, "--port", str(port)], env)
 
 

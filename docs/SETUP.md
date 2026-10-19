@@ -19,8 +19,12 @@ Pandoc and Poppler are needed by LAB. Also install:
 - [Node.js](https://nodejs.org/en/download) 20 or newer.
 - [uv](https://docs.astral.sh/uv/getting-started/installation/).
 - [Google Cloud CLI](https://cloud.google.com/sdk/docs/install).
-- [Docker Engine](https://docs.docker.com/engine/install/) for WorkBuddy-Bench,
-  with permission to run `docker info`.
+- [Docker Engine](https://docs.docker.com/engine/install/) 28 or newer for
+  WorkBuddy-Bench, with permission to run `docker info`, plus the Compose v2+
+  and buildx 0.17+ plugins. WorkBuddy attaches the agent CLI to task containers
+  as an image mount, which needs Docker Engine API 1.48. On distributions that
+  package an older Engine (Amazon Linux 2023 ships 25.x), use Docker's
+  [static binaries](https://docs.docker.com/engine/install/binaries/).
 
 Benchmark setup installs its own pinned Bun runtime under `dependencies/`.
 Keep the main Harness² environment active when running the commands below.
@@ -65,6 +69,51 @@ Keep `gcloud` on `PATH` for these Vertex configurations, including the key-file
 route: the installation check runs
 `gcloud auth application-default print-access-token`.
 
+### Amazon Bedrock
+
+Harness² can run every model role on Amazon Bedrock instead of Vertex AI. It
+selects AWS when the executor uses OpenCode's `amazon-bedrock/` provider, or
+when `HARNESS2_CLOUD=aws`. Bare model IDs (the judge, a `claude_cli` improver,
+and Codex) then also resolve on Bedrock. Install the
+[AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+so that `harness2-check` can verify credentials.
+
+```bash
+AWS_PROFILE=bedrock            # a profile allowed bedrock:InvokeModel*
+AWS_REGION=us-west-2
+HARNESS2_SOLVER_MODEL=amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+HARNESS2_IMPROVER_MODEL=amazon-bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+HARNESS2_JUDGE_MODEL=us.anthropic.claude-opus-4-6-v1
+```
+
+Use inference-profile IDs (`us.`, `eu.`, `global.`, ...) that your account can
+invoke; `aws bedrock list-inference-profiles` lists them. OpenCode needs
+`AWS_PROFILE` (or static AWS keys) to enable its Bedrock provider. Prefer a
+profile scoped to Bedrock invocation over an administrator role.
+
+| Role | How it reaches Bedrock |
+|---|---|
+| OpenCode executor and improver | OpenCode's `amazon-bedrock` provider |
+| `claude_cli` improver | Claude Code with `CLAUDE_CODE_USE_BEDROCK=1` |
+| LAB judge | `anthropic.AnthropicBedrock`, as `bedrock/<judge model>` |
+| JobBench judge, WorkBuddy solver and judge, Codex | `harness2-bridge` |
+
+JobBench judging, WorkBuddy, and Codex speak the OpenAI protocol, so on AWS
+they need `harness2-bridge` running; see [Codex executor](#codex-executor). On
+AWS it serves the Codex, judge, and WorkBuddy solver models from one endpoint,
+and the judge and WorkBuddy routes find it automatically. Start the bridge
+before `harness2-setup wb` and `harness2-check`. To use another
+OpenAI-compatible endpoint, set `HARNESS2_BRIDGE_URL` and `HARNESS2_BRIDGE_KEY`.
+
+On AWS, setup turns off Codex's built-in web search. Through the bridge it would
+become Anthropic's server-side web search tool, which Bedrock does not host, and
+every request would fail. Codex can still reach the web through its shell.
+
+The LAB judge uses adaptive thinking, so choose a Claude model that supports
+it, such as Opus 4.6 or later. The JobBench judge runs on AWS without a
+reasoning effort and with a 32,000-token completion cap. Override these with
+`HARNESS2_JUDGE_REASONING_EFFORT` and `HARNESS2_JUDGE_MAX_TOKENS`.
+
 ## Benchmark installation
 
 Install only the benchmark you intend to run:
@@ -107,7 +156,8 @@ return a nonzero exit status when incomplete.
 The Codex executor connects to a Responses API endpoint. For Gemini on Vertex
 AI, the included `harness2-bridge` provides this interface through a local
 LiteLLM server, using the same Application Default Credentials and
-`GOOGLE_CLOUD_PROJECT`.
+`GOOGLE_CLOUD_PROJECT`. On [Amazon Bedrock](#amazon-bedrock) it uses
+`AWS_PROFILE` and `AWS_REGION`.
 
 Install the optional dependencies and start the bridge in a separate session:
 

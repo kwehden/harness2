@@ -104,7 +104,11 @@ class Proposer:
 
     def env(self) -> dict[str, str]:
         e = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
-        if self.spec.kind == "claude_cli":
+        if self.spec.kind == "claude_cli" and config.ON_AWS:
+            # Bedrock credentials come from AWS_PROFILE / AWS_REGION, already in `e`.
+            e.pop("CLAUDE_CODE_USE_VERTEX", None)
+            e.update({"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_MODEL": self.spec.model})
+        elif self.spec.kind == "claude_cli":
             e.update(
                 {
                     "CLAUDE_CODE_USE_VERTEX": "1",

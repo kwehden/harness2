@@ -148,8 +148,15 @@ def overlays(name: str, *, dry_run=False):
             )
 
 
+def workbuddy_model_name(model: str) -> str:
+    """The backend model name WorkBuddy sends: a bridge alias on AWS, Vertex's otherwise."""
+    return model if config.ON_AWS else "google/" + model
+
+
 def workbuddy_models(*, dry_run=False):
-    """Generate the two Vertex routes from the user's model IDs, never credentials."""
+    """Generate the solver and judge routes from the user's model IDs, never credentials."""
+    if config.ON_AWS:
+        return _workbuddy_bedrock_models(dry_run=dry_run)
     solver = config.SOLVER_MODEL_OC.removeprefix("google-vertex/")
     judge = config.JUDGE_MODEL
     problem = ""
@@ -170,7 +177,7 @@ def workbuddy_models(*, dry_run=False):
     for role, model in (("solver", solver), ("judge", judge)):
         payload = {
             "model": {
-                "name": "google/" + model,
+                "name": workbuddy_model_name(model),
                 "protocols": ["openai"],
                 "backend_url_env": "HARNESS2_WB_VERTEX_URL",
                 "backend_key_command": "gcloud auth application-default print-access-token",
@@ -182,12 +189,44 @@ def workbuddy_models(*, dry_run=False):
                 },
             }
         }
-        path = config.wb_repo() / "configs" / "models" / "harness2" / f"{role}.yaml"
-        print(f"Configure WorkBuddy {role}: {model}", flush=True)
-        if not dry_run:
-            path.parent.mkdir(parents=True, exist_ok=True)
+        _write_workbuddy_model(role, model, payload, dry_run=dry_run)
 
-            path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+def _workbuddy_bedrock_models(*, dry_run=False):
+    """Route both roles through harness2-bridge, which holds the Bedrock credentials."""
+    solver = config.SOLVER_MODEL_OC.removeprefix(config.BEDROCK_PREFIX)
+    judge = config.JUDGE_MODEL
+    problem = ""
+    if not config.SOLVER_MODEL_OC.startswith(config.BEDROCK_PREFIX) or not judge:
+        problem = (
+            f"WorkBuddy setup on AWS requires a {config.BEDROCK_PREFIX}... executor "
+            "and a Bedrock judge ID"
+        )
+    if problem:
+        if not dry_run:
+            raise config.ConfigError(problem)
+        print(f"Configure WorkBuddy solver and judge routes -- {problem}", flush=True)
+        return
+    for role, model in (("solver", solver), ("judge", judge)):
+        payload = {
+            "model": {
+                "name": workbuddy_model_name(model),
+                "protocols": ["openai"],
+                "backend_url_env": "HARNESS2_WB_BRIDGE_URL",
+                "backend_key_env": "HARNESS2_BRIDGE_KEY",
+                "params": {"max_output_tokens": 32000 if role == "solver" else 16384},
+            }
+        }
+        _write_workbuddy_model(role, model, payload, dry_run=dry_run)
+
+
+def _write_workbuddy_model(role: str, model: str, payload: dict, *, dry_run=False):
+    path = config.wb_repo() / "configs" / "models" / "harness2" / f"{role}.yaml"
+    print(f"Configure WorkBuddy {role}: {model}", flush=True)
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def codex(*, dry_run=False):
@@ -231,6 +270,9 @@ def _share_with_containers(root: Path) -> None:
 
 CODEX_CONFIG_REMEDY = "rerun harness2-setup <bench> --substrate cx"
 CODEX_PROVIDER = "harness2"
+# Bedrock does not host Anthropic's server-side web search tool, which Codex's
+# built-in web_search maps to through the bridge; every request would fail.
+CODEX_AWS_WEB_SEARCH = 'web_search = "disabled"\n'
 
 
 def configure_codex(*, dry_run=False):
@@ -238,6 +280,7 @@ def configure_codex(*, dry_run=False):
     body = (
         f"model = {json.dumps(config.SOLVER_MODEL_CX)}\n"
         f"model_provider = {json.dumps(CODEX_PROVIDER)}\n"
+        f"{CODEX_AWS_WEB_SEARCH if config.ON_AWS else ''}"
         f'[model_providers.{CODEX_PROVIDER}]\nname = "Configured Responses endpoint"\n'
         f"base_url = {json.dumps(config.CODEX_BASE_URL)}\n"
         'wire_api = "responses"\nenv_key = "VERTEX_PROXY_KEY"\n'
@@ -274,6 +317,7 @@ def codex_config_error() -> str | None:
         for key, want, found in (
             ("base_url", config.CODEX_BASE_URL, block.get("base_url")),
             ("model", config.SOLVER_MODEL_CX, data.get("model")),
+            *([("web_search", "disabled", data.get("web_search"))] if config.ON_AWS else []),
         )
         if found != want
     ]

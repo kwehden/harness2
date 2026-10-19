@@ -1085,6 +1085,14 @@ class JobBenchAdapter:
             )
             return False
         api_base = config.JB_JUDGE_API_BASE
+        if config.ON_AWS and not (api_base and config.JB_JUDGE_API_KEY):
+            missing = "HARNESS2_JUDGE_API_KEY" if api_base else "a judge endpoint"
+            print(
+                f"  [jb] {missing} missing (start harness2-bridge or set "
+                "HARNESS2_JUDGE_BASE_URL/HARNESS2_JUDGE_API_KEY); judge not run",
+                flush=True,
+            )
+            return False
         try:
             token = (
                 config.JB_JUDGE_API_KEY
@@ -1133,6 +1141,8 @@ class JobBenchAdapter:
             "JUDGE_REASONING_EFFORT": config.JB_JUDGE_REASONING_EFFORT,
             "VERTEXAI_LOCATION": config.VERTEX_REGION,
         }
+        if config.JB_JUDGE_MAX_TOKENS:
+            env["JUDGE_MAX_COMPLETION_TOKENS"] = config.JB_JUDGE_MAX_TOKENS
         try:
             r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=1800)
         except (subprocess.SubprocessError, OSError) as exc:

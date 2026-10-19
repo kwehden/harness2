@@ -19,9 +19,11 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 
 from . import config
-from .install import PATCHES, missing_runners
+from .install import PATCHES, missing_runners, workbuddy_model_name
 from .substrate.opencode import OpencodeSubstrate
 
 
@@ -76,9 +78,35 @@ def check(adapter, *, judge=False) -> list[str]:
     if not (config.OPENCODE_DIR / "node_modules").is_dir():
         errors.append(f"OpenCode dependencies missing; run harness2-setup {bench}")
 
-    if any(
-        m.startswith("google-vertex") for m in (config.SOLVER_MODEL_OC, config.IMPROVER_MODEL)
-    ) or (judge and (bench == "wb" or config.JUDGE_MODEL.startswith(("claude", "gemini")))):
+    if config.ON_AWS:
+        if not config.env("AWS_PROFILE") and config.env("AWS_BEARER_TOKEN_BEDROCK"):
+            pass  # a Bedrock API key has no STS identity to probe
+        elif shutil.which("aws"):
+            probe(
+                "AWS credentials",
+                ["aws", "sts", "get-caller-identity"],
+                remedy="check AWS_PROFILE and refresh its credentials",
+            )
+        else:
+            errors.append("aws CLI missing; install it to verify Bedrock credentials")
+        solver = config.SOLVER_MODEL_OC.removeprefix(config.BEDROCK_PREFIX)
+        jb_bridged = judge and config.JB_JUDGE_API_BASE == config.BRIDGE_URL
+        served = {
+            "jb": [config.JUDGE_MODEL] if jb_bridged else [],
+            "wb": [solver, config.JUDGE_MODEL],
+        }
+        problem = _bridge_problem(served.get(bench, []))
+        if problem:
+            errors.append(problem)
+        if judge and bench == "jb" and not jb_bridged and not config.JB_JUDGE_API_KEY:
+            errors.append("HARNESS2_JUDGE_BASE_URL is not the bridge; set HARNESS2_JUDGE_API_KEY")
+    if config.IMPROVER_MODEL.startswith("google-vertex") or (
+        not config.ON_AWS
+        and (
+            config.SOLVER_MODEL_OC.startswith("google-vertex")
+            or (judge and (bench == "wb" or config.JUDGE_MODEL.startswith(("claude", "gemini"))))
+        )
+    ):
         probe(
             "Google Application Default Credentials",
             ["gcloud", "auth", "application-default", "print-access-token"],
@@ -89,7 +117,12 @@ def check(adapter, *, judge=False) -> list[str]:
                 errors.append(f"{binary} missing; install pandoc and poppler-utils (README.md)")
         probe(
             "LAB document and judge dependencies",
-            [config.LAB_PYTHON, "-c", "import evaluation.scoring; import google.auth, anthropic"],
+            [
+                config.LAB_PYTHON,
+                "-c",
+                "import evaluation.scoring; import anthropic, "
+                + ("boto3" if config.ON_AWS else "google.auth"),
+            ],
             cwd=repo,
         )
     elif bench == "jb" and judge:
@@ -101,12 +134,13 @@ def check(adapter, *, judge=False) -> list[str]:
                 "import pandas, openpyxl, docx, mammoth, pdfplumber, pptx, openai",
             ],
         )
-        if not config.JB_JUDGE_API_BASE:
+        if not config.ON_AWS and not config.JB_JUDGE_API_BASE:
             errors.append(
                 "Set GOOGLE_CLOUD_PROJECT or HARNESS2_JUDGE_BASE_URL for JobBench judging"
             )
         if (
-            config.JUDGE_MODEL
+            not config.ON_AWS
+            and config.JUDGE_MODEL
             and not config.JB_JUDGE_API_KEY
             and not config.JUDGE_MODEL.startswith("gemini")
         ):
@@ -132,16 +166,38 @@ def check(adapter, *, judge=False) -> list[str]:
             cwd=repo,
         )
         for role, expected in (
-            ("solver", config.SOLVER_MODEL_OC.removeprefix("google-vertex/")),
+            ("solver", config.SOLVER_MODEL_OC.split("/", 1)[-1]),
             ("judge", config.JUDGE_MODEL),
         ):
             path = repo / "configs/models/harness2" / f"{role}.yaml"
             try:
-                if json.loads(path.read_text())["model"]["name"] != "google/" + expected:
+                if json.loads(path.read_text())["model"]["name"] != workbuddy_model_name(expected):
                     errors.append(f"WorkBuddy {role} configuration is stale; rerun setup")
             except (OSError, ValueError, KeyError, TypeError):
                 errors.append(f"WorkBuddy {role} configuration missing; rerun setup")
     return errors
+
+
+def _bridge_problem(models: list[str]) -> str:
+    """Why harness2-bridge cannot serve `models` from Bedrock, or "" when it can."""
+    models = [m for m in models if m]
+    if not models:
+        return ""
+    if not config.BRIDGE_URL or not config.BRIDGE_KEY:
+        return "Start harness2-bridge in another session; Bedrock judging and WorkBuddy need it"
+    request = urllib.request.Request(
+        config.BRIDGE_URL.rstrip("/") + "/models",
+        headers={"Authorization": f"Bearer {config.BRIDGE_KEY}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            served = {m.get("id") for m in json.load(response).get("data", [])}
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        return f"harness2-bridge unreachable at {config.BRIDGE_URL} ({exc}); start it"
+    missing = sorted(set(models) - served)
+    if missing:
+        return f"harness2-bridge does not serve {', '.join(missing)}; restart it"
+    return ""
 
 
 def require_ready(adapter, *, judge=False):

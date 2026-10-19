@@ -213,8 +213,11 @@ def _check_identity(adapter, args, namespace_dir: Path) -> None:
         "executor": config.SOLVER_MODEL_OC if args.substrate == "oc" else config.SOLVER_MODEL_CX,
         "improver": config.IMPROVER_MODEL,
         "judge": config.JUDGE_MODEL,
-        "project": config.VERTEX_PROJECT,
-        "location": config.VERTEX_REGION,
+        **(
+            {"cloud": "aws", "profile": config.AWS_PROFILE, "location": config.AWS_REGION}
+            if config.ON_AWS
+            else {"project": config.VERTEX_PROJECT, "location": config.VERTEX_REGION}
+        ),
         "judge_endpoint": config.JB_JUDGE_API_BASE,
         "endpoint": config.CODEX_BASE_URL if args.substrate == "cx" else "",
         "split": args.split,

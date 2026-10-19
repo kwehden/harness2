@@ -93,18 +93,20 @@ harness2-demo --output runs/demo --k 2
 The local demo runs both recursion modes with deterministic editors and real
 Python executions. It requires no model credentials.
 
-For model-backed benchmarks, install **Node.js 20+, the Google Cloud CLI**, and
-the [benchmark dependencies](docs/SETUP.md#requirements). LAB needs Pandoc and
-Poppler; WorkBuddy-Bench needs Docker. Then configure your models:
+For model-backed benchmarks, install **Node.js 20+**, the **Google Cloud CLI** or
+**AWS CLI**, and the [benchmark dependencies](docs/SETUP.md#requirements). LAB
+needs Pandoc and Poppler; WorkBuddy-Bench needs Docker. Then configure your
+models:
 
 ```bash
 cp .env.example .env
-# Edit .env with your Vertex AI project and model IDs.
-gcloud auth application-default login
+# Edit .env with your Vertex AI project or AWS profile, and model IDs.
+gcloud auth application-default login    # Vertex AI only
 ```
 
 See the [setup guide](docs/SETUP.md) for model settings, authentication
-alternatives, and the [Codex executor](docs/SETUP.md#codex-executor).
+alternatives, [Amazon Bedrock](docs/SETUP.md#amazon-bedrock), and the
+[Codex executor](docs/SETUP.md#codex-executor).
 
 ## Run a benchmark
 
