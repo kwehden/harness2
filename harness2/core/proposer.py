@@ -37,6 +37,7 @@ from .. import config
 from .spec import ChannelSpec
 
 SYSTEM_ARG_MAX = 120_000
+COMPLETION_VERSION = 1
 
 
 MAX_CONCURRENCY = int(config.PROPOSER_CONCURRENCY)
@@ -167,7 +168,7 @@ class Proposer:
                         self._claude_cli if self.spec.kind == "claude_cli" else self._opencode
                     )(tmp, mission, system, wall)
                 spent_usd += cost
-                if not text.strip():
+                if err or not text.strip():
                     last = err or "empty reply"
                     continue
                 r = Reply(
@@ -250,8 +251,9 @@ class Proposer:
         if payload.get("is_error") or payload.get("subtype") not in (None, "success"):
             err = f"CLI error: {payload.get('subtype')} {str(text)[:200]}"
             text = ""
-        elif p.returncode != 0 and not text.strip():
+        elif p.returncode != 0:
             err = f"rc={p.returncode}: {(p.stderr or '')[-300:]}"
+            text = ""
         return text, float(payload.get("total_cost_usd") or 0.0), err
 
     def _opencode(self, cwd: Path, mission: str, system: str, wall: int) -> tuple[str, float, str]:
@@ -325,14 +327,18 @@ class Proposer:
             timeout=wall,
         )
         cost = _opencode_cost(p.stdout)
+        text, err = _opencode_stdout(p.stdout)
+        if p.returncode != 0 or err:
+            tail = _strip_oc_banner(p.stderr or "").strip()[-300:]
+            return "", cost, f"rc={p.returncode}: {err or tail or 'OpenCode failed'}"
+        # An answer file may have been written before a later failure or step limit.
+        # Require successful stream completion before trusting either output channel.
+        if text.strip():
+            return text, cost, ""
         ans = out / "answer.md"
         if ans.is_file() and ans.read_text(errors="replace").strip():
             return ans.read_text(errors="replace"), cost, ""
-        text, err = _opencode_stdout(p.stdout)
-        if text.strip():
-            return text, cost, ""
-        tail = _strip_oc_banner(p.stderr or "").strip()[-300:]
-        return "", cost, f"rc={p.returncode}: {err or tail or 'empty reply'}"
+        return "", cost, "completed OpenCode session produced no final answer"
 
     def _harvest(self, tmp: Path, sub: str, label: str, cache_key: str = "") -> Path | None:
         """Copy `tmp/<sub>` somewhere durable before the session directory is removed."""
@@ -369,6 +375,18 @@ class Proposer:
             return None
         if require_workspace and not p["workspace"].is_dir():
             return None
+        try:
+            meta = json.loads(p["meta"].read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict) or not (
+            meta.get("ok") is True
+            and meta.get("completion_version") == COMPLETION_VERSION
+            and meta.get("model") == self.spec.model
+            and meta.get("channel") == self.spec.kind
+            and not meta.get("error")
+        ):
+            return None
         txt = p["response"].read_text(encoding="utf-8", errors="replace")
         if not txt.strip():
             return None
@@ -396,6 +414,7 @@ class Proposer:
                 {
                     "label": r.label,
                     "ok": r.ok,
+                    "completion_version": COMPLETION_VERSION,
                     "channel": r.channel,
                     "model": self.spec.model,
                     "effort": self.spec.effort,
@@ -468,15 +487,17 @@ def _strip_oc_banner(s: str) -> str:
 
 
 def _opencode_stdout(stdout: str) -> tuple[str, str]:
-    """Fold `opencode run --format json` into (final assistant text, error text).
+    """Read the final completed assistant message from pinned OpenCode JSON events.
 
-    The stream is one raw event per line and assistant prose lives at part.text of a `text`
-    event. All text events are joined, so a trailing terminator event cannot swallow the
-    answer; `error` events become the error string. Plain-text stdout is returned as-is.
+    Intermediate text belongs to tool-use steps, not to the answer. A zero exit code
+    alone is insufficient: require the last message's step-finish reason to be `stop`.
+    Error events, truncated JSON and a later unfinished step invalidate all earlier text.
     """
-    texts: list[str] = []
+    texts: dict[str, list[str]] = {}
+    latest_message = ""
+    finished_message = ""
+    finish_reason = ""
     errors: list[str] = []
-    saw_json = False
     for line in (stdout or "").splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -484,27 +505,42 @@ def _opencode_stdout(stdout: str) -> tuple[str, str]:
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
+            errors.append("malformed OpenCode JSON event")
             continue
         if not isinstance(ev, dict):
             continue
-        saw_json = True
         part = _obj(ev, "part")
         ptype = part.get("type") or ev.get("type")
-        if ptype == "text":
-            t = part.get("text")
-            if isinstance(t, str) and t.strip():
-                texts.append(t)
-        elif ptype == "error":
-            e = ev.get("error")
-            if isinstance(e, dict):
-                msg = str(_obj(e, "data").get("message") or e.get("name") or "").strip()
+        if ptype == "error":
+            error = ev.get("error")
+            if isinstance(error, dict):
+                message = _obj(error, "data").get("message") or error.get("name")
             else:
-                msg = str(e or "").strip()
-            if msg:
-                errors.append(msg)
-    if not saw_json:
-        return _strip_oc_banner(stdout).strip(), ""
-    return "\n\n".join(texts), "; ".join(errors)[-300:]
+                message = error
+            errors.append(str(message or "OpenCode error"))
+            continue
+        if ptype not in ("step-start", "step_start", "step-finish", "step_finish", "text"):
+            continue
+        message_id = part.get("messageID")
+        if not isinstance(message_id, str) or not message_id:
+            errors.append("OpenCode event has no messageID")
+            continue
+        latest_message = message_id
+        if ptype in ("step-start", "step_start"):
+            finished_message = ""
+            finish_reason = ""
+        elif ptype == "text":
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                texts.setdefault(message_id, []).append(text)
+        else:
+            finished_message = message_id
+            finish_reason = str(part.get("reason") or "")
+    if errors:
+        return "", "; ".join(errors)[-300:]
+    if not latest_message or finished_message != latest_message or finish_reason != "stop":
+        return "", f"OpenCode did not finish a final answer (reason={finish_reason or 'missing'})"
+    return "\n\n".join(texts.get(finished_message, [])), ""
 
 
 def _opencode_cost(stdout: str) -> float:

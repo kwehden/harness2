@@ -227,7 +227,20 @@ def _run_stage(
         if err:
             harness_tree.write_tree(surface, new, tree.root / "harness")
             continue
-        notes = re.search(r"<notes>(.*?)</notes>", reply.text, re.S)
+        notes = re.fullmatch(r"\s*<notes>(.*?)</notes>\s*", reply.text, re.S)
+        if (
+            not notes
+            or not notes.group(1).strip()
+            or any(tag in notes.group(1) for tag in ("<notes>", "</notes>"))
+        ):
+            err = "return exactly one complete, nonempty <notes> block with your final decision"
+            continue
+        decision = notes.group(1).strip()
+        if kept and not re.search(r"\bKEEP_BASE\b", decision):
+            err = (
+                "the harness is unchanged; explicitly say KEEP_BASE in <notes> or finish your edits"
+            )
+            continue
         return Stage(
             label=label,
             dim=dim,
@@ -236,7 +249,7 @@ def _run_stage(
             usd=spent_usd,
             attempts=spent_calls,
             cached=all_cached,
-            notes=notes.group(1).strip() if notes else reply.text.strip(),
+            notes=decision,
         )
 
     return Stage(

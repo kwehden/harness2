@@ -24,7 +24,7 @@ from pathlib import Path
 PKG = Path(__file__).resolve().parent
 ROOT = PKG.parent if (PKG.parent / "pyproject.toml").is_file() else Path.cwd()
 THIRD_PARTY = ROOT / "third_party"
-METHOD_VERSION = 2
+METHOD_VERSION = 3
 
 DEPENDENCIES = ROOT / "dependencies"
 

@@ -63,7 +63,12 @@ class HaikuImproverTests(unittest.TestCase):
         ):
             opencode_dir.return_value = Path(tmp) / "opencode"
             run.return_value = Mock(
-                stdout='{"type":"text","part":{"text":"done"}}', stderr="", returncode=0
+                stdout=(
+                    '{"type":"text","part":{"messageID":"m","text":"done"}}\n'
+                    '{"type":"step_finish","part":{"messageID":"m","reason":"stop"}}'
+                ),
+                stderr="",
+                returncode=0,
             )
             proposer._opencode(Path(tmp), "mission", "system", 5)
             oc_config = json.loads((Path(tmp) / "opencode.json").read_text())
@@ -187,7 +192,14 @@ class WorkflowTests(unittest.TestCase):
             previous_sessions.append(database.exists())
             database.parent.mkdir(parents=True, exist_ok=True)
             database.write_text("private evidence from this session")
-            return Mock(stdout='{"type":"text","part":{"text":"done"}}', stderr="", returncode=0)
+            return Mock(
+                stdout=(
+                    '{"type":"text","part":{"messageID":"m","text":"done"}}\n'
+                    '{"type":"step_finish","part":{"messageID":"m","reason":"stop"}}'
+                ),
+                stderr="",
+                returncode=0,
+            )
 
         proposer = Proposer(self.proposer.spec)
         with (

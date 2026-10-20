@@ -231,7 +231,7 @@ def _check_identity(adapter, args, namespace_dir: Path) -> None:
     if path.is_file():
         if json.loads(path.read_text()) != json.loads(json.dumps(identity)):
             raise ValueError(
-                "This run directory belongs to different models or tasks. "
+                "This run directory belongs to different models, tasks, or method version. "
                 "Choose a new HARNESS2_RUNS_DIR for a new experiment."
             )
     else:

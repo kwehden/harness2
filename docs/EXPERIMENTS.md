@@ -118,5 +118,16 @@ Repeat the same command to resume. Failed evaluations remain unscored rather
 than being counted as zero. Use a new `HARNESS2_RUNS_DIR` when changing models or
 task selection.
 
+Method version 3 requires a completed improver session and a final `<notes>`
+decision. An unchanged harness must explicitly say `KEEP_BASE`; partial progress,
+provider errors, and incomplete tool loops are rejected rather than accepted as
+successful refinement. Invalid decisions receive the bounded retry, then appear
+as a fallback if still invalid. A deliberate `KEEP_BASE` is valid, but it is not
+an adaptation gain.
+
+Use a new `HARNESS2_RUNS_DIR` when upgrading from method version 2. Older
+improver caches lack completion validation and are not trusted by this version;
+keep those artifacts as historical evidence rather than relabeling them.
+
 Refinement, judging, and reporting use `harness2`, `harness2-judge`, and
 `harness2-report`; each supports `--help`.
