@@ -16,6 +16,11 @@
   </a>
 </p>
 
+This fork adds **Amazon Bedrock support** to
+[Google Research's Harness²](https://github.com/google-research/harness2).
+The quick start uses Bedrock for the executor, improver, and judge. Vertex AI
+remains available; the upstream method, attribution, and licenses are retained.
+
 A **harness** is the system around a model that enables it to act as an agent:
 prompts, tools, memory, skills, orchestration, and more. **Harnessing** is the
 process of optimizing that system.
@@ -38,11 +43,13 @@ connects two levels of recursion while keeping model weights fixed:
   </a>
 </p>
 
-Across three professional benchmarks and four model–harness configurations, a
-single Harness² step improves GLM-5 and Gemini 3.5 Flash over their base
-harnesses, with gains of up to 11.5 points on WorkBuddy-Bench, 4.5 points on
-JobBench, and 11.8 percentage points on LAB's partial pass rate. Increasing the
-task-level recursion budget brings further gains.
+The upstream paper reports results across three professional benchmarks and
+four model-harness configurations: a single Harness² step improves GLM-5 and
+Gemini 3.5 Flash over their base harnesses, with gains of up to 11.5 points on
+WorkBuddy-Bench, 4.5 points on JobBench, and 11.8 percentage points on LAB's
+partial pass rate. Those are upstream results, not results established by this
+Bedrock port. A successful model call or one-task smoke run does not establish
+an adaptation gain.
 
 The release supports **parallel and sequential recursion**, **OpenCode and
 Codex executors**, and **JobBench, LAB, and WorkBuddy-Bench**.
@@ -81,9 +88,11 @@ inside the tool loop.
 ## Install
 
 Use **Linux, Python 3.12, and [uv](https://docs.astral.sh/uv/getting-started/installation/)**.
-From the repository root:
+Clone this fork, then work from its repository root:
 
 ```bash
+git clone https://github.com/kwehden/harness2.git
+cd harness2
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 uv pip install -e '.[render]'
@@ -93,32 +102,59 @@ harness2-demo --output runs/demo --k 2
 The local demo runs both recursion modes with deterministic editors and real
 Python executions. It requires no model credentials.
 
-For model-backed benchmarks, install **Node.js 20+, the Google Cloud CLI**, and
-the [benchmark dependencies](docs/SETUP.md#requirements). LAB needs Pandoc and
-Poppler; WorkBuddy-Bench needs Docker. Then configure your models:
+For Bedrock-backed benchmarks, install **Node.js 20+** and the **AWS CLI**.
+Configure AWS credentials using a named profile, the default profile, or an
+attached IAM role. Grant access to the chosen Bedrock models. See the
+[setup guide](docs/SETUP.md#amazon-bedrock) for authentication and regional
+inference-profile requirements.
 
 ```bash
+uv pip install -e '.[render,bridge]'
 cp .env.example .env
-# Edit .env with your Vertex AI project and model IDs.
-gcloud auth application-default login
+# Edit .env: AWS region, optional profile, and model IDs.
 ```
 
-See the [setup guide](docs/SETUP.md) for model settings, authentication
-alternatives, and the [Codex executor](docs/SETUP.md#codex-executor).
+The example selects Claude Haiku 5.5 for all three roles. Model availability
+and access depend on your region and account. For Vertex AI, switch to the
+commented Vertex configuration in `.env.example` and follow
+[Vertex authentication](docs/SETUP.md#google-vertex-ai).
 
 ## Run a benchmark
 
-The following example installs LAB and runs one task, then evaluates and reports
-its result. Model-backed runs incur API costs; start with a small task selection.
+Start with one JobBench task. Model-backed refinement and judging incur API
+costs. Install the benchmark first:
 
 ```bash
-harness2-setup lab
-harness2-check --bench lab
-harness2 --bench lab --k 1 --mode parallel \
-  --only-domains antitrust-competition --max-tasks 1
-harness2-judge --bench lab --k 1 --mode parallel
-harness2-report --bench lab --k 1 --mode parallel
+harness2-setup jb
 ```
+
+JobBench judging uses the local OpenAI-compatible bridge to reach Bedrock.
+In a **second terminal**, from this repository with the same virtual environment
+active, run `harness2-bridge` and leave it running. Keep its access key private.
+Back in the first terminal:
+
+```bash
+export HARNESS2_RUNS_DIR=runs/bedrock-jb-smoke
+harness2-check --bench jb
+harness2 --bench jb --k 1 --mode parallel \
+  --only-domains biostatisticians --max-tasks 1 --dry-run
+```
+
+The check and preview do not call a model or prove model access. Review the
+selected task and configured models, then run and score the same selection:
+
+```bash
+harness2 --bench jb --k 1 --mode parallel \
+  --only-domains biostatisticians --max-tasks 1
+harness2-judge --bench jb --k 1 --mode parallel
+harness2-judge --bench jb --k 1 --mode parallel --bases
+harness2-report --bench jb --k 1 --mode parallel
+```
+
+The report covers the selected output. The `--bases` command saves the
+unadapted comparison in `base_judged.json`. Check stage fallback flags as well
+as scores: a completed solver run can still have failed harness refinement.
+A single task validates integration, not benchmark-wide effectiveness.
 
 Sequential recursion runs the same commands with `--mode sequential`. `--k` is
 the task-level recursion budget; see [Experiments](#experiments). Judging and
@@ -205,5 +241,6 @@ upstream licenses; see
 
 ## Disclaimer
 
-This is not an officially supported Google product. This project is not eligible
-for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).
+This community fork is not an officially supported Amazon or AWS product.
+The upstream project is not an officially supported Google product. This project
+is not eligible for the [Google Open Source Software Vulnerability Rewards Program](https://bughunters.google.com/open-source-security).

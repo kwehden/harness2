@@ -18,52 +18,123 @@ Pandoc and Poppler are needed by LAB. Also install:
 
 - [Node.js](https://nodejs.org/en/download) 20 or newer.
 - [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- [Google Cloud CLI](https://cloud.google.com/sdk/docs/install).
-- [Docker Engine](https://docs.docker.com/engine/install/) for WorkBuddy-Bench,
-  with permission to run `docker info`.
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+  for Bedrock, or [Google Cloud CLI](https://cloud.google.com/sdk/docs/install)
+  for Vertex AI. You do not need both for a single-cloud configuration.
+- [Docker Engine](https://docs.docker.com/engine/install/) 28 or newer for
+  WorkBuddy-Bench, with permission to run `docker info`, plus the Compose v2+
+  and buildx 0.17+ plugins. WorkBuddy attaches the agent CLI to task containers
+  as an image mount, which needs Docker Engine API 1.48. On distributions that
+  package an older Engine (Amazon Linux 2023 ships 25.x), use Docker's
+  [static binaries](https://docs.docker.com/engine/install/binaries/).
 
 Benchmark setup installs its own pinned Bun runtime under `dependencies/`.
 Keep the main Harness² environment active when running the commands below.
 
 ## Models and credentials
 
-Copy `.env.example` to `.env` if you have not already done so. Set your Vertex AI
-project and model IDs, then authenticate:
+Copy `.env.example` to `.env` if needed. This fork's example selects Amazon
+Bedrock. Shell environment variables take precedence over `.env`; keep secrets
+out of tracked files. Your account must have access to every configured model.
+
+| Setting | Meaning |
+|---|---|
+| `HARNESS2_CLOUD` | `aws` or `gcp`; inferred from the executor provider when omitted |
+| `HARNESS2_SOLVER_MODEL` | Executor model in OpenCode's `provider/model` format |
+| `HARNESS2_IMPROVER_MODEL` | Improver model in the same format; defaults to the executor |
+| `HARNESS2_JUDGE_MODEL` | Bare model ID for the chosen cloud; adapters add their routing prefix |
+| `HARNESS2_RUNS_DIR` | Output root; defaults to `runs/`; change it when changing models or tasks |
+
+### Amazon Bedrock
+
+Harness² can run every model role on Amazon Bedrock instead of Vertex AI. It
+selects AWS when the executor uses OpenCode's `amazon-bedrock/` provider, or
+when `HARNESS2_CLOUD=aws`. Bare model IDs (the judge, a `claude_cli` improver,
+and Codex) then also resolve on Bedrock. Install the
+[AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+so that `harness2-check` can verify credentials.
+
+```bash
+# Optional: set only when using a named profile.
+# AWS_PROFILE=bedrock
+HARNESS2_CLOUD=aws
+AWS_REGION=us-west-2
+HARNESS2_SOLVER_MODEL=amazon-bedrock/us.anthropic.claude-haiku-5-5
+HARNESS2_IMPROVER_MODEL=amazon-bedrock/us.anthropic.claude-haiku-5-5
+HARNESS2_JUDGE_MODEL=us.anthropic.claude-haiku-5-5
+```
+
+Use inference-profile IDs (`us.`, `eu.`, `global.`, ...) that your account can
+invoke in `AWS_REGION`; `aws bedrock list-inference-profiles` lists available
+profiles. The example IDs are not a guarantee of model access. Use
+least-privilege permissions for Bedrock invocation, including streaming and the
+resources required by your inference profile, rather than an administrator role.
+
+`AWS_PROFILE` is optional. Leave it unset to use the default shared profile or
+the SDK credential chain, including EC2 instance roles, ECS task roles, and EKS
+web identity. Use your normal AWS authentication process to refresh credentials.
+The readiness check uses `aws sts get-caller-identity`; configuration loading
+does not contact AWS. STS success verifies AWS identity, not model access.
+Use standard AWS credentials for the full benchmark workflow. A Bedrock bearer
+token has no STS identity, so the no-model-call check cannot verify it. OpenCode
+prefers that token when present, even alongside a profile; unset it when you
+intend to use the profile or role.
+
+| Role | How it reaches Bedrock |
+|---|---|
+| OpenCode executor and improver | OpenCode's `amazon-bedrock` provider |
+| `claude_cli` improver | Claude Code with `CLAUDE_CODE_USE_BEDROCK=1` |
+| LAB judge | `anthropic.AnthropicBedrock`, as `bedrock/<judge model>` |
+| JobBench judge, WorkBuddy solver and judge, Codex | `harness2-bridge` |
+
+JobBench judging, WorkBuddy, and Codex speak the OpenAI protocol, so on AWS
+they need `harness2-bridge` running; see [Codex executor](#codex-executor). On
+AWS it serves the Codex, judge, and WorkBuddy solver models from one endpoint,
+and the judge and WorkBuddy routes find it automatically. Start the bridge
+before `harness2-setup wb` and `harness2-check`. To use another
+OpenAI-compatible endpoint, set `HARNESS2_BRIDGE_URL` and `HARNESS2_BRIDGE_KEY`.
+
+On AWS, setup turns off Codex's built-in web search. Through the bridge it would
+become Anthropic's server-side web search tool, which Bedrock does not host, and
+every request would fail. Codex can still reach the web through its shell.
+
+The Haiku 5.5 OpenCode improver uses adaptive thinking with the configured
+effort instead of OpenCode's legacy fixed-budget variant. Older Bedrock Claude
+models retain their existing variant behavior. The LAB judge also uses adaptive
+thinking, so choose a compatible Claude judge, such as the Haiku 5.5 example.
+The JobBench judge runs on AWS without a reasoning effort and with a
+32,000-token completion cap. Override these with
+`HARNESS2_JUDGE_REASONING_EFFORT` and `HARNESS2_JUDGE_MAX_TOKENS`. AWS judge
+requests omit temperature so Haiku 5.5 and other sampling-restricted models use
+their supported defaults. Vertex retains the upstream temperature of zero.
+Rerun `harness2-setup jb` after updating this fork to install the judge patch.
+
+### Google Vertex AI
+
+Comment out the Bedrock model settings in `.env` and enable its Vertex example.
+Set `GOOGLE_CLOUD_PROJECT`, the executor and improver in OpenCode's
+`google-vertex/model` format, and a bare judge ID. `GOOGLE_CLOUD_LOCATION`
+defaults to `global`. Authenticate with:
 
 ```bash
 gcloud auth application-default login
 ```
 
-Shell environment variables take precedence over `.env`.
-`GOOGLE_CLOUD_PROJECT` identifies your project; `GOOGLE_CLOUD_LOCATION` defaults
-to `global`. Your account must have access to each configured model.
+The Vertex configuration supports Gemini executors and judges, with either
+Vertex Claude or Gemini as the improver. LAB also supports the upstream judge's
+direct providers when their credentials are configured. WorkBuddy's Vertex
+routes require Gemini for both solver and judge; rerun setup after changing
+these models.
 
-| Setting | Meaning |
-|---|---|
-| `HARNESS2_SOLVER_MODEL` | Executor model in OpenCode's `provider/model` format |
-| `HARNESS2_IMPROVER_MODEL` | Improver model in the same format; defaults to the executor |
-| `HARNESS2_JUDGE_MODEL` | Bare judge model ID; the adapter supplies the Vertex prefix |
-| `HARNESS2_RUNS_DIR` | Output root; defaults to `runs/` |
+On a machine with an attached service account, Application Default Credentials
+can use that account. Other options include:
 
-The provided configuration uses Vertex Gemini executors and judges, and supports
-either Vertex Claude or Gemini as the improver. LAB also supports the upstream
-judge's direct providers when their credentials are configured. For WorkBuddy,
-setup generates the Gemini solver and judge routes from these settings; rerun
-setup after changing either model.
-
-### Authentication alternatives
-
-On a machine with a configured attached service account, Application Default
-Credentials can use that account. Other options include:
-
-- `gcloud auth application-default login --no-browser`, which prints a command
-  to run on another machine that has a browser.
+- `gcloud auth application-default login --no-browser` for a remote machine.
 - `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service account key file.
 - `gcloud auth application-default login --impersonate-service-account=<account>`.
 
-Keep `gcloud` on `PATH` for these Vertex configurations, including the key-file
-route: the installation check runs
-`gcloud auth application-default print-access-token`.
+Keep `gcloud` on `PATH`, including for the key-file route: the installation check
+runs `gcloud auth application-default print-access-token`.
 
 ## Benchmark installation
 
@@ -102,12 +173,29 @@ These checks do not test model availability. Access to an executor, improver, or
 judge model is tested when that model is first called. Refinement and judging
 return a nonzero exit status when incomplete.
 
+## Developer checks
+
+From a source checkout with the main virtual environment active:
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/check_provenance.py
+python -m compileall -q harness2 tests scripts
+harness2-demo --output runs/dev-check --k 2
+```
+
+These checks need no model credentials or downloaded OpenCode checkout. The
+GitHub workflow runs them on Python 3.12 and 3.13, then builds the source
+archive and wheel and verifies the archive contains the benchmark assets.
+They do not replace a live smoke run for model access or provider compatibility.
+
 ## Codex executor
 
 The Codex executor connects to a Responses API endpoint. For Gemini on Vertex
 AI, the included `harness2-bridge` provides this interface through a local
 LiteLLM server, using the same Application Default Credentials and
-`GOOGLE_CLOUD_PROJECT`.
+`GOOGLE_CLOUD_PROJECT`. On [Amazon Bedrock](#amazon-bedrock) it uses
+the AWS credential chain and `AWS_REGION`.
 
 Install the optional dependencies and start the bridge in a separate session:
 
@@ -159,7 +247,12 @@ see [web access during evaluation](EXPERIMENTS.md#web-access).
 
 ## Wheel installations
 
-A wheel ships the `harness2` package only. The task partitioner,
-`python scripts/split_tasks.py`, requires this source tree. For a wheel
-installation, work from a dedicated directory: `.env`, `dependencies/`, and
-`runs/` are resolved there.
+Use a source checkout or the source distribution for benchmark setup. They
+include the required `third_party/` runners, patches, licenses, and asset
+checksums. Run `python scripts/check_provenance.py` to verify those assets.
+
+A wheel ships the Python package only, without benchmark runners and patches.
+It can run the deterministic demo, but installing the wheel alone is not enough
+to set up a benchmark. The task partitioner, `python scripts/split_tasks.py`,
+also requires the source tree. Outside a source checkout, `.env`,
+`dependencies/`, and `runs/` are resolved from the working directory.

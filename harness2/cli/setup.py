@@ -80,7 +80,7 @@ def main(argv=None):
                     "install",
                     "--python",
                     repo / ".venv/bin/python",
-                    "google-auth[requests]",
+                    "boto3" if config.ON_AWS else "google-auth[requests]",
                 ],
                 dry_run=dry,
             )

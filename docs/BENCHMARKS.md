@@ -28,7 +28,7 @@ Sequential recursion runs the same commands with `--mode sequential`.
 Tasks arrive with the pinned checkout at
 `dependencies/harvey-labs/tasks/<practice-area>/<task>/task.json`, and the adapter
 discovers all installed tasks; no separate task list is required. Setup installs
-the LAB dependency environment, the runner overlays, and the included Vertex
+the LAB dependency environment, the runner overlays, and the included Vertex/Bedrock
 judge patch.
 
 The judge reads outputs only after selection. Reports use Partial (fraction of
@@ -61,7 +61,11 @@ places tasks at `dependencies/job-bench-eval/dataset/main/`. It also installs th
 document extraction dependencies and a judge patch that handles reasoning effort
 and empty completions. Rubrics stay outside the improver's evidence.
 
-With a Gemini `HARNESS2_JUDGE_MODEL`, the judge uses the project's Vertex
+On Bedrock, start `harness2-bridge` in a separate terminal before the check and
+keep it running through judging. The judge finds the bridge endpoint and key
+automatically. See the [one-task quick start](../README.md#run-a-benchmark).
+
+On Vertex with a Gemini `HARNESS2_JUDGE_MODEL`, the judge uses the project's
 OpenAI-compatible endpoint and Application Default Credentials. For a separate
 judge provider, set `HARNESS2_JUDGE_BASE_URL`, `HARNESS2_JUDGE_API_KEY`, and the
 model ID that endpoint accepts. The reported score uses the upstream rubric
@@ -100,14 +104,18 @@ takes one subset at a time.
 Setup installs the pinned Harbor-based runtime, applies the included adapter,
 mount, and credential/transport patches, copies the harness runners, creates
 solver and judge routes from `.env`, downloads the requested subset with the
-upstream fetch script, and builds the OpenCode harness image. The public Vertex
-setup uses a `google-vertex/gemini...` executor and a bare `gemini...` judge ID;
-no model YAML or account-specific proxy configuration needs to be copied from
-another checkout. Setup refuses to run unless `HARNESS2_SOLVER_MODEL` is a
-`google-vertex/gemini...` ID and `HARNESS2_JUDGE_MODEL` a bare `gemini...` one,
-with `GOOGLE_CLOUD_PROJECT` set; `--dry-run` reports the requirement and still
-prints the rest of the plan. The benchmark's job-local proxy refreshes ADC tokens
-and preserves Gemini tool-call thought signatures.
+upstream fetch script, and builds the OpenCode harness image. No model YAML or
+account-specific proxy configuration needs to be copied from another checkout.
+
+On Bedrock, use an `amazon-bedrock/...` executor and a bare Bedrock judge ID.
+Start `harness2-bridge --host 0.0.0.0` before setup and leave it running for the
+experiment. This exposes the bridge on all interfaces; restrict access to the
+intended clients. Setup generates routes for both models through that bridge.
+
+On Vertex, use a `google-vertex/gemini...` executor, a bare `gemini...` judge ID,
+and `GOOGLE_CLOUD_PROJECT`. The benchmark's job-local proxy refreshes ADC tokens
+and preserves Gemini tool-call thought signatures. Setup rejects incompatible
+models; `--dry-run` prints the requirement without installing anything.
 
 Setup patches the upstream fetch script to download with `curl` (then `wget`,
 then `hf`) and to require the dataset repository's `SHA256SUMS`: an archive that
@@ -121,4 +129,6 @@ uses a fresh benchmark container. The adapter reads the verifier's `score.json`;
 the improver never receives verifier output. Missing verifier results remain
 unscored. Runs live under `runs/wb/<subset>/`.
 
-For Codex, start the bridge with `harness2-bridge --host 0.0.0.0` so that the containers can reach it.
+For Codex on either cloud, the bridge must also listen on `--host 0.0.0.0`
+so that task containers can reach it. Bedrock disables Codex's built-in web
+search; shell-based network access remains possible.

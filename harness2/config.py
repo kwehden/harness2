@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -23,7 +24,7 @@ from pathlib import Path
 PKG = Path(__file__).resolve().parent
 ROOT = PKG.parent if (PKG.parent / "pyproject.toml").is_file() else Path.cwd()
 THIRD_PARTY = ROOT / "third_party"
-METHOD_VERSION = 2
+METHOD_VERSION = 3
 
 DEPENDENCIES = ROOT / "dependencies"
 
@@ -94,12 +95,60 @@ VERTEX_REGION = env("GOOGLE_CLOUD_LOCATION", "global")
 if VERTEX_PROJECT:
     os.environ.setdefault("GOOGLE_CLOUD_PROJECT", VERTEX_PROJECT)
 os.environ.setdefault("GOOGLE_CLOUD_LOCATION", VERTEX_REGION)
+if not os.environ.get("AWS_PROFILE", "x"):
+    del os.environ["AWS_PROFILE"]  # an empty profile names no profile and breaks the AWS SDKs
+AWS_PROFILE = env("AWS_PROFILE", "")
+AWS_REGION = env("AWS_REGION", env("AWS_DEFAULT_REGION", "us-east-1"))
 
 
 SOLVER_MODEL_OC = env("HARNESS2_SOLVER_MODEL", "")
 SOLVER_MODEL_CX = env("HARNESS2_CODEX_MODEL", SOLVER_MODEL_OC.split("/", 1)[-1])
 IMPROVER_MODEL = env("HARNESS2_IMPROVER_MODEL", SOLVER_MODEL_OC)
 JUDGE_MODEL = env("HARNESS2_JUDGE_MODEL", "")
+
+# Bare model IDs (judge, claude_cli improver, Codex) carry no provider, so the cloud
+# that serves them is explicit, defaulting to the executor's OpenCode provider.
+BEDROCK_PREFIX = "amazon-bedrock/"
+CLOUD = env(
+    "HARNESS2_CLOUD", "aws" if SOLVER_MODEL_OC.startswith(BEDROCK_PREFIX) else "gcp"
+).lower()
+ON_AWS = CLOUD == "aws"
+# A GCP deployment may still run a Bedrock improver, so Bedrock settings follow the roles
+# actually pointed at Bedrock rather than the cloud of the executor.
+USES_BEDROCK = ON_AWS or IMPROVER_MODEL.startswith(BEDROCK_PREFIX)
+if USES_BEDROCK:
+    os.environ.setdefault("AWS_REGION", AWS_REGION)
+    # Credentials are the AWS SDK's job, not this file's: every consumer here (OpenCode's
+    # Bedrock provider, LiteLLM, the claude CLI under CLAUDE_CODE_USE_BEDROCK) resolves
+    # them through its default credential chain, so no explicit AWS_PROFILE is required
+    # for a default profile, an SSO session, an EC2 instance role, an ECS task role or an
+    # EKS web identity -- each still needs its own setup, just not one named here. The
+    # pinned OpenCode autoloads amazon-bedrock only when an environment variable hints at
+    # a credential, which misses the sources that leave no trace; this opt-in, added by
+    # third_party/patches/opencode-bedrock-credential-chain.diff, is set only where a role
+    # is on Bedrock and hands resolution to the chain. Whether a credential works is
+    # preflight's question.
+    os.environ.setdefault("OPENCODE_BEDROCK_CREDENTIAL_CHAIN", "1")
+
+
+# On AWS, OpenAI-protocol consumers (JobBench judge, WorkBuddy proxy, Codex) reach
+# Bedrock through harness2-bridge, which saves its port and key here.
+BRIDGE_FILE = DEPENDENCIES / "codex" / "bridge.json"
+
+
+def _saved_bridge() -> dict:
+    try:
+        saved = json.loads(BRIDGE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+_bridge = _saved_bridge()
+BRIDGE_URL = env(
+    "HARNESS2_BRIDGE_URL", f"http://127.0.0.1:{_bridge['port']}/v1" if _bridge.get("port") else ""
+)
+BRIDGE_KEY = env("HARNESS2_BRIDGE_KEY", _bridge.get("key", ""))
 
 DEPENDENCY_PINS = {
     "job-bench-eval": "fa03a17f9ff662f136798a274e10011c3aa00fd0",
@@ -130,14 +179,19 @@ def lab_repo() -> Path:
 OPENCODE_DIR = DEPENDENCIES / "opencode"
 BUN = DEPENDENCIES / "tools" / "node_modules" / ".bin" / "bun"
 LAB_PYTHON = lab_repo() / ".venv" / "bin" / "python"
-LAB_JUDGE_MODEL = (
-    "vertex/" + JUDGE_MODEL if JUDGE_MODEL.startswith(("claude", "gemini")) else JUDGE_MODEL
-)
+if ON_AWS:
+    LAB_JUDGE_MODEL = (
+        "bedrock/" + JUDGE_MODEL if JUDGE_MODEL and "/" not in JUDGE_MODEL else JUDGE_MODEL
+    )
+else:
+    LAB_JUDGE_MODEL = (
+        "vertex/" + JUDGE_MODEL if JUDGE_MODEL.startswith(("claude", "gemini")) else JUDGE_MODEL
+    )
 LAB_DELIV_CAP = 60000
 JB_JUDGE_PYTHON = jb_repo() / ".venv" / "bin" / "python"
 JB_JUDGE_MODEL = (
     "google/" + JUDGE_MODEL
-    if JUDGE_MODEL.startswith("gemini") and not env("HARNESS2_JUDGE_BASE_URL")
+    if not ON_AWS and JUDGE_MODEL.startswith("gemini") and not env("HARNESS2_JUDGE_BASE_URL")
     else JUDGE_MODEL
 )
 _vertex_host = (
@@ -149,9 +203,16 @@ VERTEX_OPENAI_URL = (
     f"https://{_vertex_host}/v1/projects/{VERTEX_PROJECT}"
     f"/locations/{VERTEX_REGION}/endpoints/openapi"
 )
-JB_JUDGE_API_BASE = env("HARNESS2_JUDGE_BASE_URL", VERTEX_OPENAI_URL if VERTEX_PROJECT else "")
-JB_JUDGE_API_KEY = env("HARNESS2_JUDGE_API_KEY", "")
-JB_JUDGE_REASONING_EFFORT = "low"
+if ON_AWS:
+    JB_JUDGE_API_BASE = env("HARNESS2_JUDGE_BASE_URL", BRIDGE_URL)
+    JB_JUDGE_API_KEY = env("HARNESS2_JUDGE_API_KEY", BRIDGE_KEY)
+else:
+    JB_JUDGE_API_BASE = env("HARNESS2_JUDGE_BASE_URL", VERTEX_OPENAI_URL if VERTEX_PROJECT else "")
+    JB_JUDGE_API_KEY = env("HARNESS2_JUDGE_API_KEY", "")
+# Claude on Bedrock rejects temperature 0 alongside extended thinking, and caps output
+# below the upstream 64k default, so the AWS judge runs without a reasoning effort.
+JB_JUDGE_REASONING_EFFORT = env("HARNESS2_JUDGE_REASONING_EFFORT", "default" if ON_AWS else "low")
+JB_JUDGE_MAX_TOKENS = env("HARNESS2_JUDGE_MAX_TOKENS", "32000" if ON_AWS else "")
 JB_REPORTING_JUDGE_DETAILS = ""
 JB_OBS_TRUNC = 50000
 
@@ -182,6 +243,12 @@ def validate_models(*, judge: bool = False) -> None:
     require("HARNESS2_SOLVER_MODEL", needed_by="executor rollouts")
     if "/" not in SOLVER_MODEL_OC or "/" not in IMPROVER_MODEL:
         raise ConfigError("Executor and improver models must use OpenCode's provider/model syntax")
+    if CLOUD not in ("aws", "gcp"):
+        raise ConfigError(f"HARNESS2_CLOUD must be 'aws' or 'gcp', got {CLOUD!r}")
+    if ON_AWS and not SOLVER_MODEL_OC.startswith(BEDROCK_PREFIX):
+        raise ConfigError(f"HARNESS2_CLOUD=aws needs a {BEDROCK_PREFIX}... HARNESS2_SOLVER_MODEL")
+    if not ON_AWS and SOLVER_MODEL_OC.startswith(BEDROCK_PREFIX):
+        raise ConfigError("A Bedrock executor needs HARNESS2_CLOUD=aws (or unset)")
     if any(m.startswith("google-vertex") for m in (SOLVER_MODEL_OC, IMPROVER_MODEL)):
         if not VERTEX_PROJECT:
             raise ConfigError("Set GOOGLE_CLOUD_PROJECT for Vertex AI")

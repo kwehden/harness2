@@ -27,12 +27,19 @@ from pathlib import Path
 
 from . import config
 
+# One dependency can carry several patches, applied and checked independently so that a
+# checkout already holding an earlier patch upgrades by gaining only the new one.
 PATCHES = {
-    "opencode": "opencode-compat.diff",
-    "job-bench-eval": "job-bench-eval-judge.diff",
-    "harvey-labs": "harvey-labs-judge-vertex-anthropic.diff",
-    "workbuddy-bench": "workbuddy-bench-runtime.diff",
+    "opencode": ("opencode-compat.diff", "opencode-bedrock-credential-chain.diff"),
+    "job-bench-eval": ("job-bench-eval-judge.diff", "job-bench-eval-judge-sampling.diff"),
+    "harvey-labs": ("harvey-labs-judge-vertex-anthropic.diff",),
+    "workbuddy-bench": ("workbuddy-bench-runtime.diff",),
 }
+
+
+def patch_files(name: str) -> list[Path]:
+    return [config.THIRD_PARTY / "patches" / patch for patch in PATCHES[name]]
+
 
 RUNNERS = (
     "jb_runner/run_benchmark_codex_cli_adapt.sh",
@@ -47,7 +54,7 @@ def missing_runners() -> str:
     A copy of the code without third-party material still runs the demo and tests, but
     setup needs these files to install a benchmark.
     """
-    need = [config.THIRD_PARTY / "patches" / name for name in PATCHES.values()]
+    need = [path for name in PATCHES for path in patch_files(name)]
     need += [config.THIRD_PARTY / name for name in RUNNERS]
     absent = [path for path in need if not path.exists()]
     if not absent:
@@ -104,22 +111,23 @@ def clone(name: str, *, dry_run=False):
 
 
 def patch(name: str, *, dry_run=False):
+    """Apply each patch this dependency needs, skipping the ones already in the checkout."""
     repo = config.DEPENDENCIES / name
-    source = config.THIRD_PARTY / "patches" / PATCHES[name]
-    if dry_run:
-        run(["git", "-C", repo, "apply", "--check", source], dry_run=True)
-        run(["git", "-C", repo, "apply", source], dry_run=True)
-        return
-    if (
-        subprocess.run(
-            ["git", "-C", str(repo), "apply", "--reverse", "--check", str(source)],
-            capture_output=True,
-        ).returncode
-        == 0
-    ):
-        return
-    run(["git", "-C", repo, "apply", "--check", source])
-    run(["git", "-C", repo, "apply", source])
+    for source in patch_files(name):
+        if dry_run:
+            run(["git", "-C", repo, "apply", "--check", source], dry_run=True)
+            run(["git", "-C", repo, "apply", source], dry_run=True)
+            continue
+        if (
+            subprocess.run(
+                ["git", "-C", str(repo), "apply", "--reverse", "--check", str(source)],
+                capture_output=True,
+            ).returncode
+            == 0
+        ):
+            continue
+        run(["git", "-C", repo, "apply", "--check", source])
+        run(["git", "-C", repo, "apply", source])
 
 
 def overlays(name: str, *, dry_run=False):
@@ -148,8 +156,15 @@ def overlays(name: str, *, dry_run=False):
             )
 
 
+def workbuddy_model_name(model: str) -> str:
+    """The backend model name WorkBuddy sends: a bridge alias on AWS, Vertex's otherwise."""
+    return model if config.ON_AWS else "google/" + model
+
+
 def workbuddy_models(*, dry_run=False):
-    """Generate the two Vertex routes from the user's model IDs, never credentials."""
+    """Generate the solver and judge routes from the user's model IDs, never credentials."""
+    if config.ON_AWS:
+        return _workbuddy_bedrock_models(dry_run=dry_run)
     solver = config.SOLVER_MODEL_OC.removeprefix("google-vertex/")
     judge = config.JUDGE_MODEL
     problem = ""
@@ -170,7 +185,7 @@ def workbuddy_models(*, dry_run=False):
     for role, model in (("solver", solver), ("judge", judge)):
         payload = {
             "model": {
-                "name": "google/" + model,
+                "name": workbuddy_model_name(model),
                 "protocols": ["openai"],
                 "backend_url_env": "HARNESS2_WB_VERTEX_URL",
                 "backend_key_command": "gcloud auth application-default print-access-token",
@@ -182,12 +197,44 @@ def workbuddy_models(*, dry_run=False):
                 },
             }
         }
-        path = config.wb_repo() / "configs" / "models" / "harness2" / f"{role}.yaml"
-        print(f"Configure WorkBuddy {role}: {model}", flush=True)
-        if not dry_run:
-            path.parent.mkdir(parents=True, exist_ok=True)
+        _write_workbuddy_model(role, model, payload, dry_run=dry_run)
 
-            path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+def _workbuddy_bedrock_models(*, dry_run=False):
+    """Route both roles through harness2-bridge, which holds the Bedrock credentials."""
+    solver = config.SOLVER_MODEL_OC.removeprefix(config.BEDROCK_PREFIX)
+    judge = config.JUDGE_MODEL
+    problem = ""
+    if not config.SOLVER_MODEL_OC.startswith(config.BEDROCK_PREFIX) or not judge:
+        problem = (
+            f"WorkBuddy setup on AWS requires a {config.BEDROCK_PREFIX}... executor "
+            "and a Bedrock judge ID"
+        )
+    if problem:
+        if not dry_run:
+            raise config.ConfigError(problem)
+        print(f"Configure WorkBuddy solver and judge routes -- {problem}", flush=True)
+        return
+    for role, model in (("solver", solver), ("judge", judge)):
+        payload = {
+            "model": {
+                "name": workbuddy_model_name(model),
+                "protocols": ["openai"],
+                "backend_url_env": "HARNESS2_WB_BRIDGE_URL",
+                "backend_key_env": "HARNESS2_BRIDGE_KEY",
+                "params": {"max_output_tokens": 32000 if role == "solver" else 16384},
+            }
+        }
+        _write_workbuddy_model(role, model, payload, dry_run=dry_run)
+
+
+def _write_workbuddy_model(role: str, model: str, payload: dict, *, dry_run=False):
+    path = config.wb_repo() / "configs" / "models" / "harness2" / f"{role}.yaml"
+    print(f"Configure WorkBuddy {role}: {model}", flush=True)
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def codex(*, dry_run=False):
@@ -231,6 +278,9 @@ def _share_with_containers(root: Path) -> None:
 
 CODEX_CONFIG_REMEDY = "rerun harness2-setup <bench> --substrate cx"
 CODEX_PROVIDER = "harness2"
+# Bedrock does not host Anthropic's server-side web search tool, which Codex's
+# built-in web_search maps to through the bridge; every request would fail.
+CODEX_AWS_WEB_SEARCH = 'web_search = "disabled"\n'
 
 
 def configure_codex(*, dry_run=False):
@@ -238,6 +288,7 @@ def configure_codex(*, dry_run=False):
     body = (
         f"model = {json.dumps(config.SOLVER_MODEL_CX)}\n"
         f"model_provider = {json.dumps(CODEX_PROVIDER)}\n"
+        f"{CODEX_AWS_WEB_SEARCH if config.ON_AWS else ''}"
         f'[model_providers.{CODEX_PROVIDER}]\nname = "Configured Responses endpoint"\n'
         f"base_url = {json.dumps(config.CODEX_BASE_URL)}\n"
         'wire_api = "responses"\nenv_key = "VERTEX_PROXY_KEY"\n'
@@ -274,6 +325,7 @@ def codex_config_error() -> str | None:
         for key, want, found in (
             ("base_url", config.CODEX_BASE_URL, block.get("base_url")),
             ("model", config.SOLVER_MODEL_CX, data.get("model")),
+            *([("web_search", "disabled", data.get("web_search"))] if config.ON_AWS else []),
         )
         if found != want
     ]

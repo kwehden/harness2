@@ -1,0 +1,42 @@
+name: Offline tests
+
+on:
+  push:
+    branches: [main, aws-port]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13']
+    env:
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package and build tools
+        run: python -m pip install -e . build ruff==0.17.1
+      - name: Unit and workflow tests without external checkouts
+        run: python -m unittest discover -s tests -v
+      - name: Lint Python sources
+        run: ruff check harness2 tests scripts
+      - name: Check release asset provenance
+        run: python scripts/check_provenance.py
+      - name: Compile Python sources
+        run: python -m compileall -q harness2 tests scripts
+      - name: Exercise deterministic end-to-end workflow
+        run: harness2-demo --output runs/ci-demo --k 2
+      - name: Build source distribution and wheel
+        run: |
+          python -m build
+          python scripts/check_distribution.py dist/harness2-*.tar.gz

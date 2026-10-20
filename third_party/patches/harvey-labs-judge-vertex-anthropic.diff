@@ -1,12 +1,18 @@
+diff --git a/evaluation/judge.py b/evaluation/judge.py
+index ffad89de..dd5f5171 100644
 --- a/evaluation/judge.py
 +++ b/evaluation/judge.py
-@@ -28,8 +28,12 @@
+@@ -28,8 +28,16 @@ _VERDICT_SCHEMA = {
  }
  
  def _detect_provider(model: str) -> str:
 -    """Return 'anthropic', 'google', 'openai', or 'mistral' from the model name."""
-+    """Return 'vertex-anthropic', 'anthropic', 'google', 'openai', or 'mistral'."""
++    """Return 'bedrock-anthropic', 'vertex-anthropic', 'anthropic', 'google', 'openai', or 'mistral'."""
      name = model.lower()
++    if name.startswith("bedrock/"):
++        if "anthropic." not in name:
++            raise ValueError(f"Bedrock judges must be Claude models, got {model!r}")
++        return "bedrock-anthropic"
 +    if name.startswith("vertex/gemini"):
 +        return "vertex-google"
 +    if name.startswith("vertex/"):
@@ -14,7 +20,7 @@
      if name.startswith("claude"):
          return "anthropic"
      if name.startswith("gemini"):
-@@ -50,9 +54,24 @@
+@@ -50,9 +58,35 @@ class Judge:
              model: Model ID (e.g. 'claude-sonnet-4-6', 'gemini-3-flash-preview',
                  'gpt-5.4', 'mistral-medium-3.5').
          """
@@ -23,8 +29,19 @@
 -        if self.provider == "anthropic":
 +        # 'vertex/claude-opus-4-8' -> API model id 'claude-opus-4-8'. The bare
 +        # id is what lands in scores_<model>.json filenames, so keep it clean.
-+        self.model = model.split("/", 1)[1] if self.provider.startswith("vertex-") else model
-+        if self.provider == "vertex-anthropic":
++        self.model = (
++            model.split("/", 1)[1] if self.provider.startswith(("vertex-", "bedrock-")) else model
++        )
++        if self.provider == "bedrock-anthropic":
++            # Claude on Amazon Bedrock via the AWS credential chain (AWS_PROFILE,
++            # AWS_REGION); the model is a Bedrock ID or inference profile.
++            self.client = anthropic.AnthropicBedrock(
++                aws_region=os.environ.get("AWS_REGION", "us-east-1"),
++                aws_profile=os.environ.get("AWS_PROFILE") or None,
++                max_retries=5,
++                timeout=900.0,
++            )
++        elif self.provider == "vertex-anthropic":
 +            # Claude on Vertex via ADC — no API key. Anthropic models on
 +            # Vertex are served from the global endpoint.
 +            self.client = anthropic.AnthropicVertex(
@@ -41,7 +58,7 @@
              self.client = anthropic.Anthropic(max_retries=1)
          elif self.provider == "google":
              self.client = genai.Client()
-@@ -65,7 +84,13 @@
+@@ -65,7 +99,13 @@ class Judge:
              )
  
      def evaluate(
@@ -56,11 +73,13 @@
      ) -> dict:
          """Send a formatted prompt to the judge and parse the JSON response.
  
-@@ -78,13 +103,78 @@
+@@ -78,14 +118,81 @@ class Judge:
              Parsed JSON dict from the judge's response.
          """
          prompt = prompt_template.format(**variables)
-+        if self.provider == "vertex-anthropic":
++        if self.provider in ("vertex-anthropic", "bedrock-anthropic"):
++            # Same schema-free path as Vertex: structured-output support varies
++            # across Bedrock Claude models, so JSON comes from the prompt.
 +            return self._evaluate_anthropic_vertex(prompt, _retries)
          if self.provider == "anthropic":
              return self._evaluate_anthropic(prompt, temperature, _retries)
@@ -70,7 +89,7 @@
          if self.provider == "openai":
              return self._evaluate_openai(prompt, temperature, _retries)
          return self._evaluate_mistral(prompt, temperature, _retries)
-+
+ 
 +    # System steer replaces the structured-output constraint we can't use on
 +    # Vertex (see _evaluate_anthropic_vertex). The rubric prompt already asks
 +    # for a fenced JSON object, and _parse_json strips the fences.
@@ -133,10 +152,11 @@
 +        raise ValueError(
 +            f"Judge returned unparseable response after {_retries} attempts: {last_err}"
 +        )
- 
++
      def _evaluate_anthropic(self, prompt: str, temperature: float, _retries: int) -> dict:
          last_err: Exception | None = None
-@@ -236,11 +326,21 @@
+         for attempt in range(_retries):
+@@ -236,11 +343,21 @@ class Judge:
          match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
          if match:
              try:
@@ -160,7 +180,7 @@
          for i, ch in enumerate(text):
              if ch == '{':
                  depth = 0
-@@ -251,9 +351,61 @@
+@@ -251,9 +368,61 @@ class Judge:
                          depth -= 1
                      if depth == 0:
                          try:

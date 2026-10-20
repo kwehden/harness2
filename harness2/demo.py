@@ -156,8 +156,14 @@ class DemoProposer(Proposer):
         else:
             workspace = context / "harness"
             script = workspace / "scripts/summarize.py"
-            script.write_text(script.read_text().replace(" if amount > 0", ""), encoding="utf-8")
-            text = "<notes>Keep signed amounts: the base total omitted credits in the source ledger.</notes>"
+            before = script.read_text()
+            after = before.replace(" if amount > 0", "")
+            script.write_text(after, encoding="utf-8")
+            text = (
+                "<notes>KEEP_BASE: signed amounts are already included.</notes>"
+                if before == after
+                else "<notes>Keep signed amounts: the base total omitted credits in the source ledger.</notes>"
+            )
         reply = Reply(label=label, text=text, ok=True, attempts=1, workspace=workspace)
         self._calls.append(reply)
         return reply
