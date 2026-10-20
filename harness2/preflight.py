@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 
 from . import config
-from .install import PATCHES, missing_runners, workbuddy_model_name
+from .install import missing_runners, patch_files, workbuddy_model_name
 from .substrate.opencode import OpencodeSubstrate
 
 
@@ -70,25 +70,17 @@ def check(adapter, *, judge=False) -> list[str]:
                     errors.append(f"{dependency}: checkout differs from the supported pin")
             except subprocess.CalledProcessError:
                 errors.append(f"{dependency}: cannot read checkout revision")
-        patch = config.THIRD_PARTY / "patches" / PATCHES[dependency]
-        probe(
-            f"{dependency} patch",
-            ["git", "-C", target, "apply", "--reverse", "--check", patch],
-        )
+        for patch in patch_files(dependency):
+            probe(
+                f"{dependency} patch {patch.name}",
+                ["git", "-C", target, "apply", "--reverse", "--check", patch],
+            )
     if not (config.OPENCODE_DIR / "node_modules").is_dir():
         errors.append(f"OpenCode dependencies missing; run harness2-setup {bench}")
 
+    if config.USES_BEDROCK:
+        errors.extend(aws_credential_errors())
     if config.ON_AWS:
-        if not config.env("AWS_PROFILE") and config.env("AWS_BEARER_TOKEN_BEDROCK"):
-            pass  # a Bedrock API key has no STS identity to probe
-        elif shutil.which("aws"):
-            probe(
-                "AWS credentials",
-                ["aws", "sts", "get-caller-identity"],
-                remedy="check AWS_PROFILE and refresh its credentials",
-            )
-        else:
-            errors.append("aws CLI missing; install it to verify Bedrock credentials")
         solver = config.SOLVER_MODEL_OC.removeprefix(config.BEDROCK_PREFIX)
         jb_bridged = judge and config.JB_JUDGE_API_BASE == config.BRIDGE_URL
         served = {
@@ -178,6 +170,66 @@ def check(adapter, *, judge=False) -> list[str]:
     return errors
 
 
+STS_TIMEOUT = 45
+BEARER_TOKEN = "AWS_BEARER_TOKEN_BEDROCK"
+
+
+def aws_credential_errors() -> list[str]:
+    """Check for a usable AWS identity, and say plainly what that leaves unproved.
+
+    Nothing here mirrors a credential chain: one `aws sts get-caller-identity` resolves
+    the CLI's chain, so a named profile, the default profile, an SSO session, an EC2
+    instance role, an ECS task role and an EKS web identity are all resolved by an SDK
+    rather than guessed from the environment. The model clients (OpenCode's JavaScript
+    provider, LiteLLM, the claude CLI) each resolve their own chain, which is not the same
+    implementation, so this is evidence that the account and credential files are usable,
+    not proof that those clients will resolve the same identity. It is not Bedrock access
+    either: bedrock:InvokeModel on the configured model is still first exercised by the
+    first model call.
+
+    A Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) signs no AWS request, has no STS identity
+    and takes precedence over the chain inside OpenCode's Bedrock provider, so an STS call
+    beside it would prove nothing about the key. That case warns and never blocks: only a
+    billable model call separates a live key from a revoked one.
+    """
+    if config.env(BEARER_TOKEN):
+        print(
+            f"WARNING: {BEARER_TOKEN} is set and OpenCode's Bedrock provider prefers it over "
+            "the AWS credential chain. Its validity is unverified here and no AWS identity "
+            "is proved; benchmark steps that call AWS APIs other than Bedrock runtime still "
+            "need standard IAM credentials.",
+            flush=True,
+        )
+        return []
+    if not shutil.which("aws"):
+        return [
+            "aws CLI missing; install it so preflight can resolve the AWS credential chain "
+            "(a run itself resolves credentials through its own SDK)"
+        ]
+    command = [
+        "aws",
+        "sts",
+        "get-caller-identity",
+        "--region",
+        config.AWS_REGION,
+        "--no-cli-pager",
+        "--output",
+        "json",
+    ]
+    try:
+        r = subprocess.run(command, capture_output=True, text=True, timeout=STS_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"AWS credential check did not finish ({type(exc).__name__}); see docs/SETUP.md"]
+    if r.returncode == 0:
+        return []
+    detail = (r.stderr or r.stdout or "").strip().splitlines()
+    return [
+        "the AWS credential chain resolves no usable identity"
+        + (f": {detail[-1][:200]}" if detail else "")
+        + "; refresh the credentials the SDK would use (profile, SSO session, or role)"
+    ]
+
+
 def _bridge_problem(models: list[str]) -> str:
     """Why harness2-bridge cannot serve `models` from Bedrock, or "" when it can."""
     models = [m for m in models if m]
@@ -208,6 +260,9 @@ def require_ready(adapter, *, judge=False):
     pointed at an endpoint. Those are offline presence and import checks — they catch an
     unset or unbuilt judge, not an account that cannot serve the judge model, which is
     still first learned when the judge actually calls it.
+
+    The one exception is the AWS credential check, which does reach the network to resolve
+    the credential chain; see `aws_credential_errors` for what it proves.
     """
     errors = check(adapter, judge=judge)
     if errors:

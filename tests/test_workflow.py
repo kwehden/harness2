@@ -14,13 +14,17 @@
 
 """Focused regressions for the paper's execution, evidence, and adoption contracts."""
 
+import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from harness2 import config
+from harness2 import config, preflight
 from harness2.core import context, judge, recursion, schedule, tree
 from harness2.core.library import Library
 from harness2.core.proposer import Proposer, ProposerError, Reply
@@ -46,10 +50,18 @@ class HaikuImproverTests(unittest.TestCase):
         )
 
     def _check_options(self, model: str, expected: dict | None, *, variant: bool):
+        """Inspect the request we build for OpenCode without an OpenCode checkout present.
+
+        `_opencode_dir` is stubbed because this asserts what harness2 writes and spawns,
+        not that the pinned dependency is installed, which preflight covers.
+        """
         proposer = Proposer(resolve_channel_model("opencode", model, effort="high"))
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "harness2.core.proposer.subprocess.run"
-        ) as run:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("harness2.core.proposer._opencode_dir") as opencode_dir,
+            patch("harness2.core.proposer.subprocess.run") as run,
+        ):
+            opencode_dir.return_value = Path(tmp) / "opencode"
             run.return_value = Mock(
                 stdout='{"type":"text","part":{"text":"done"}}', stderr="", returncode=0
             )
@@ -264,6 +276,116 @@ class WorkflowTests(unittest.TestCase):
         )
         self.adapter.score.assert_not_called()
         self.assertEqual((rows[0].graded, rows[0].n_passed), (False, None))
+
+
+class AwsCredentialPreflightTests(unittest.TestCase):
+    """Preflight is the operational credential check; the SDK chain does the resolving."""
+
+    def run_check(self, *, env=None, returncode=0, stderr="", aws="/usr/bin/aws", raises=None):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if raises is not None:
+                raise raises
+            return Mock(
+                returncode=returncode, stdout='{"Arn": "arn:aws:iam::1:user/u"}', stderr=stderr
+            )
+
+        printed = io.StringIO()
+        with (
+            patch.dict(os.environ, env or {}, clear=True),
+            patch.object(preflight.shutil, "which", return_value=aws),
+            patch.object(preflight.subprocess, "run", side_effect=fake_run),
+            redirect_stdout(printed),
+        ):
+            errors = preflight.aws_credential_errors()
+        return errors, calls, printed.getvalue()
+
+    def test_resolved_identity_passes_with_one_bounded_probe(self):
+        errors, calls, printed = self.run_check()
+        self.assertEqual((errors, printed), ([], ""))
+        self.assertEqual(len(calls), 1)
+        command, kwargs = calls[0]
+        self.assertEqual(
+            command,
+            [
+                "aws",
+                "sts",
+                "get-caller-identity",
+                "--region",
+                config.AWS_REGION,
+                "--no-cli-pager",
+                "--output",
+                "json",
+            ],
+        )
+        self.assertEqual(kwargs["timeout"], preflight.STS_TIMEOUT)
+
+    def test_every_chain_source_takes_the_same_path(self):
+        """Nothing branches on which source the chain will use: the CLI resolves it."""
+        for name, env in (
+            ("default profile", {}),
+            ("named profile", {"AWS_PROFILE": "bedrock"}),
+            ("instance role", {"AWS_EC2_METADATA_DISABLED": "false"}),
+            ("task role", {"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": "/v2/creds"}),
+            (
+                "web identity",
+                {
+                    "AWS_WEB_IDENTITY_TOKEN_FILE": "/var/run/token",
+                    "AWS_ROLE_ARN": "arn:aws:iam::1:role/eks",
+                },
+            ),
+            ("static keys", {"AWS_ACCESS_KEY_ID": "AKIA", "AWS_SECRET_ACCESS_KEY": "s"}),
+        ):
+            with self.subTest(source=name):
+                errors, calls, _ = self.run_check(env=env)
+                self.assertEqual(errors, [])
+                self.assertEqual(len(calls), 1)
+                self.assertNotIn("--profile", calls[0][0])
+
+    def test_unusable_credentials_fail_with_the_cli_reason(self):
+        for name, env, stderr in (
+            (
+                "missing profile",
+                {"AWS_PROFILE": "absent"},
+                "The config profile (absent) could not be found",
+            ),
+            ("expired sso", {}, "Error loading SSO Token: Token has expired"),
+            ("no source", {}, "Unable to locate credentials"),
+        ):
+            with self.subTest(case=name):
+                errors, calls, _ = self.run_check(env=env, returncode=255, stderr=stderr)
+                self.assertEqual(len(errors), 1)
+                self.assertIn("resolves no usable identity", errors[0])
+                self.assertIn(stderr.splitlines()[-1][:40], errors[0])
+                self.assertEqual(len(calls), 1)
+
+    def test_a_hung_probe_is_reported_not_awaited_forever(self):
+        errors, _, _ = self.run_check(
+            raises=subprocess.TimeoutExpired(cmd="aws", timeout=preflight.STS_TIMEOUT)
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("TimeoutExpired", errors[0])
+
+    def test_missing_cli_is_reported_as_a_check_gap(self):
+        errors, calls, _ = self.run_check(aws=None)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("aws CLI missing", errors[0])
+
+    def test_bearer_token_warns_and_never_blocks(self):
+        """A Bedrock API key has no STS identity, and OpenCode prefers it over the chain."""
+        for name, env in (
+            ("key alone", {"AWS_BEARER_TOKEN_BEDROCK": "key"}),
+            ("key beside a profile", {"AWS_BEARER_TOKEN_BEDROCK": "key", "AWS_PROFILE": "p"}),
+        ):
+            with self.subTest(case=name):
+                errors, calls, printed = self.run_check(env=env)
+                self.assertEqual((errors, calls), ([], []))
+                self.assertIn("WARNING", printed)
+                self.assertIn("unverified", printed)
+                self.assertIn("no AWS identity", printed)
 
 
 if __name__ == "__main__":

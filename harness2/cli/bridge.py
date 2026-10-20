@@ -60,6 +60,8 @@ def bedrock_models() -> list[str]:
 def litellm_config(models: list[str]) -> str:
     if not config.ON_AWS:
         return LITELLM_CONFIG.format(model=models[0])
+    # Name the profile only when the deployment named one; with no AWS_PROFILE, LiteLLM
+    # falls back to boto3's default chain, which is what a role or default profile needs.
     profile = "      aws_profile_name: os.environ/AWS_PROFILE\n" if config.AWS_PROFILE else ""
     # Claude goes through Bedrock's native Anthropic invoke API: LiteLLM's Converse
     # translation of Codex's Responses requests sends tool_choice twice, which Bedrock
@@ -114,9 +116,11 @@ def main(argv=None):
     if not litellm.is_file():
         p.exit(1, "LiteLLM is not installed; run: uv pip install -e '.[render,bridge]'\n")
     if config.ON_AWS:
+        # No credential gate: LiteLLM resolves Bedrock credentials through boto3's chain,
+        # which also covers the default profile, SSO, and instance, task and web identity
+        # roles. An unusable credential surfaces when the proxy serves a request, and
+        # `harness2-check` resolves a chain before a run.
         models = args.model or bedrock_models()
-        if not config.aws_credentials_configured():
-            p.exit(1, "Set AWS_PROFILE in .env\n")
     else:
         models = args.model or [config.SOLVER_MODEL_CX]
         if len(models) > 1:

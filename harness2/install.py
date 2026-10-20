@@ -27,12 +27,19 @@ from pathlib import Path
 
 from . import config
 
+# One dependency can carry several patches, applied and checked independently so that a
+# checkout already holding an earlier patch upgrades by gaining only the new one.
 PATCHES = {
-    "opencode": "opencode-compat.diff",
-    "job-bench-eval": "job-bench-eval-judge.diff",
-    "harvey-labs": "harvey-labs-judge-vertex-anthropic.diff",
-    "workbuddy-bench": "workbuddy-bench-runtime.diff",
+    "opencode": ("opencode-compat.diff", "opencode-bedrock-credential-chain.diff"),
+    "job-bench-eval": ("job-bench-eval-judge.diff",),
+    "harvey-labs": ("harvey-labs-judge-vertex-anthropic.diff",),
+    "workbuddy-bench": ("workbuddy-bench-runtime.diff",),
 }
+
+
+def patch_files(name: str) -> list[Path]:
+    return [config.THIRD_PARTY / "patches" / patch for patch in PATCHES[name]]
+
 
 RUNNERS = (
     "jb_runner/run_benchmark_codex_cli_adapt.sh",
@@ -47,7 +54,7 @@ def missing_runners() -> str:
     A copy of the code without third-party material still runs the demo and tests, but
     setup needs these files to install a benchmark.
     """
-    need = [config.THIRD_PARTY / "patches" / name for name in PATCHES.values()]
+    need = [path for name in PATCHES for path in patch_files(name)]
     need += [config.THIRD_PARTY / name for name in RUNNERS]
     absent = [path for path in need if not path.exists()]
     if not absent:
@@ -104,22 +111,23 @@ def clone(name: str, *, dry_run=False):
 
 
 def patch(name: str, *, dry_run=False):
+    """Apply each patch this dependency needs, skipping the ones already in the checkout."""
     repo = config.DEPENDENCIES / name
-    source = config.THIRD_PARTY / "patches" / PATCHES[name]
-    if dry_run:
-        run(["git", "-C", repo, "apply", "--check", source], dry_run=True)
-        run(["git", "-C", repo, "apply", source], dry_run=True)
-        return
-    if (
-        subprocess.run(
-            ["git", "-C", str(repo), "apply", "--reverse", "--check", str(source)],
-            capture_output=True,
-        ).returncode
-        == 0
-    ):
-        return
-    run(["git", "-C", repo, "apply", "--check", source])
-    run(["git", "-C", repo, "apply", source])
+    for source in patch_files(name):
+        if dry_run:
+            run(["git", "-C", repo, "apply", "--check", source], dry_run=True)
+            run(["git", "-C", repo, "apply", source], dry_run=True)
+            continue
+        if (
+            subprocess.run(
+                ["git", "-C", str(repo), "apply", "--reverse", "--check", str(source)],
+                capture_output=True,
+            ).returncode
+            == 0
+        ):
+            continue
+        run(["git", "-C", repo, "apply", "--check", source])
+        run(["git", "-C", repo, "apply", source])
 
 
 def overlays(name: str, *, dry_run=False):

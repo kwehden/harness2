@@ -113,13 +113,22 @@ CLOUD = env(
     "HARNESS2_CLOUD", "aws" if SOLVER_MODEL_OC.startswith(BEDROCK_PREFIX) else "gcp"
 ).lower()
 ON_AWS = CLOUD == "aws"
-if ON_AWS:
+# A GCP deployment may still run a Bedrock improver, so Bedrock settings follow the roles
+# actually pointed at Bedrock rather than the cloud of the executor.
+USES_BEDROCK = ON_AWS or IMPROVER_MODEL.startswith(BEDROCK_PREFIX)
+if USES_BEDROCK:
     os.environ.setdefault("AWS_REGION", AWS_REGION)
-
-
-def aws_credentials_configured() -> bool:
-    """Whether a credential source OpenCode's Bedrock provider accepts is configured."""
-    return bool(AWS_PROFILE or env("AWS_ACCESS_KEY_ID") or env("AWS_BEARER_TOKEN_BEDROCK"))
+    # Credentials are the AWS SDK's job, not this file's: every consumer here (OpenCode's
+    # Bedrock provider, LiteLLM, the claude CLI under CLAUDE_CODE_USE_BEDROCK) resolves
+    # them through its default credential chain, so no explicit AWS_PROFILE is required
+    # for a default profile, an SSO session, an EC2 instance role, an ECS task role or an
+    # EKS web identity -- each still needs its own setup, just not one named here. The
+    # pinned OpenCode autoloads amazon-bedrock only when an environment variable hints at
+    # a credential, which misses the sources that leave no trace; this opt-in, added by
+    # third_party/patches/opencode-bedrock-credential-chain.diff, is set only where a role
+    # is on Bedrock and hands resolution to the chain. Whether a credential works is
+    # preflight's question.
+    os.environ.setdefault("OPENCODE_BEDROCK_CREDENTIAL_CHAIN", "1")
 
 
 # On AWS, OpenAI-protocol consumers (JobBench judge, WorkBuddy proxy, Codex) reach
@@ -243,8 +252,5 @@ def validate_models(*, judge: bool = False) -> None:
     if any(m.startswith("google-vertex") for m in (SOLVER_MODEL_OC, IMPROVER_MODEL)):
         if not VERTEX_PROJECT:
             raise ConfigError("Set GOOGLE_CLOUD_PROJECT for Vertex AI")
-    if ON_AWS or IMPROVER_MODEL.startswith(BEDROCK_PREFIX):
-        if not aws_credentials_configured():
-            raise ConfigError("Set AWS_PROFILE for Amazon Bedrock (see .env.example)")
     if judge:
         require("HARNESS2_JUDGE_MODEL", needed_by="benchmark judging")
