@@ -31,7 +31,7 @@ from . import config
 # checkout already holding an earlier patch upgrades by gaining only the new one.
 PATCHES = {
     "opencode": ("opencode-compat.diff", "opencode-bedrock-credential-chain.diff"),
-    "job-bench-eval": ("job-bench-eval-judge.diff",),
+    "job-bench-eval": ("job-bench-eval-judge.diff", "job-bench-eval-judge-sampling.diff"),
     "harvey-labs": ("harvey-labs-judge-vertex-anthropic.diff",),
     "workbuddy-bench": ("workbuddy-bench-runtime.diff",),
 }

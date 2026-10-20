@@ -104,7 +104,10 @@ models retain their existing variant behavior. The LAB judge also uses adaptive
 thinking, so choose a compatible Claude judge, such as the Haiku 5.5 example.
 The JobBench judge runs on AWS without a reasoning effort and with a
 32,000-token completion cap. Override these with
-`HARNESS2_JUDGE_REASONING_EFFORT` and `HARNESS2_JUDGE_MAX_TOKENS`.
+`HARNESS2_JUDGE_REASONING_EFFORT` and `HARNESS2_JUDGE_MAX_TOKENS`. AWS judge
+requests omit temperature so Haiku 5.5 and other sampling-restricted models use
+their supported defaults. Vertex retains the upstream temperature of zero.
+Rerun `harness2-setup jb` after updating this fork to install the judge patch.
 
 ### Google Vertex AI
 

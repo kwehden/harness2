@@ -1,0 +1,59 @@
+diff --git a/eval/judge.py b/eval/judge.py
+index 8412969..12df774 100755
+--- a/eval/judge.py
++++ b/eval/judge.py
+@@ -26,6 +26,7 @@ from contextlib import contextmanager
+ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from datetime import datetime, timezone
+ from pathlib import Path
++from types import SimpleNamespace
+
+
+ MAX_CHARS_PER_FILE = 200_000
+@@ -415,13 +416,45 @@ def resolve_api_config(
+     return api_base, api_key
+
+
++def omits_temperature() -> bool:
++    """Whether the caller asked for judge requests that carry no temperature.
++
++    The harness sets JUDGE_OMIT_TEMPERATURE for a route whose judge model
++    rejects the fixed temperature=0.0 below, so that the model's own default
++    stands. Unset, requests keep the deterministic temperature.
++    """
++    return os.environ.get("JUDGE_OMIT_TEMPERATURE", "").strip().lower() not in (
++        "",
++        "0",
++        "false",
++        "no",
++    )
++
++
++class JudgeClientWithoutTemperature:
++    """Narrow facade for the judge's `chat.completions.create`, called with no
++    temperature. Other client attributes are reached directly on the client."""
++
++    def __init__(self, client):
++        self._client = client
++        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
++
++    def _create(self, **kwargs):
++        kwargs.pop("temperature", None)
++        return self._client.chat.completions.create(**kwargs)
++
++    def __getattr__(self, name):
++        return getattr(self._client, name)
++
++
+ def get_openai_client(api_base: str, api_key: str):
+     from openai import OpenAI
+
+     if not api_key:
+         raise ValueError("No judge API key provided. Set JUDGE_API_KEY.")
+
+-    return OpenAI(base_url=api_base, api_key=api_key)
++    client = OpenAI(base_url=api_base, api_key=api_key)
++    return JudgeClientWithoutTemperature(client) if omits_temperature() else client
+
+
+ def parse_judge_json(content: str) -> tuple[dict, str]:

@@ -21,6 +21,9 @@ checkout at another revision.
   It applies separately so an existing compatibility-patched checkout can upgrade.
 - `job-bench-eval-judge.diff`: passes reasoning effort, raises the judge output
   cap, and rejects empty completions.
+- `job-bench-eval-judge-sampling.diff`: omits temperature for AWS judge requests,
+  while leaving the upstream temperature unchanged on other routes. This patch
+  is separate from the existing judge changes so installed checkouts can upgrade.
 - `harvey-labs-judge-vertex-anthropic.diff`: adds Claude and Gemini Vertex judges
   using ADC, Claude Bedrock judges using AWS credentials, and improved
   malformed/ambiguous response handling.

@@ -1140,6 +1140,10 @@ class JobBenchAdapter:
             "JUDGE_API_KEY": token,
             "JUDGE_REASONING_EFFORT": config.JB_JUDGE_REASONING_EFFORT,
             "VERTEXAI_LOCATION": config.VERTEX_REGION,
+            # On AWS the judge runs on Bedrock, where a model may reject the upstream
+            # fixed temperature=0.0; omitting it lets the model default stand. The
+            # Vertex judge keeps the deterministic temperature.
+            "JUDGE_OMIT_TEMPERATURE": "1" if config.ON_AWS else "",
         }
         if config.JB_JUDGE_MAX_TOKENS:
             env["JUDGE_MAX_COMPLETION_TOKENS"] = config.JB_JUDGE_MAX_TOKENS
