@@ -16,18 +16,22 @@ checkout at another revision.
 - `opencode-compat.diff`: fixes a moving Git dependency to the commit already in
   the upstream lock and adds Opus 4.8 adaptive-thinking support to the pinned
   provider adapter.
+- `opencode-bedrock-credential-chain.diff`: enables the AWS credential chain for
+  explicit Bedrock use without requiring profile or key environment variables.
+  It applies separately so an existing compatibility-patched checkout can upgrade.
 - `job-bench-eval-judge.diff`: passes reasoning effort, raises the judge output
   cap, and rejects empty completions.
 - `harvey-labs-judge-vertex-anthropic.diff`: adds Claude and Gemini Vertex judges
-  using ADC and improves malformed/ambiguous response handling.
+  using ADC, Claude Bedrock judges using AWS credentials, and improved
+  malformed/ambiguous response handling.
 - `workbuddy-bench-runtime.diff`: registers the release's executor adapters,
   preserves declared harness mounts, refreshes short-lived credentials, and
   preserves Gemini thought signatures across tool calls. It also fixes an
   undefined constant in the upstream Anthropic route support.
 
 Patches are checked before applying and skipped if already applied. Derived runner
-files belong in `harness2/third_party/{jb,lab,wb}_runner/`, which this copy does not
-include; setup copies the LAB and WorkBuddy overlays into the upstream checkouts.
+files are included in `third_party/{jb,lab,wb}_runner/`; setup copies the LAB
+and WorkBuddy overlays into the upstream checkouts.
 
 The upstream dependency locks are used for Python installations. OpenCode uses
 Bun 1.3.11 and the patched lock. Codex uses the version in `config.CODEX_VERSION`.
